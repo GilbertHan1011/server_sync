@@ -5,13 +5,13 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
-    backend::{Backend, CrosstermBackend},
+    backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Terminal,
 };
-use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config, PollWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
@@ -45,7 +45,7 @@ impl AppState {
 
     fn add_log(&mut self, msg: String) {
         self.logs.push(format!("[{}] {}", chrono::Local::now().format("%H:%M:%S"), msg));
-        if self.logs.len() > 20 { self.logs.remove(0); } // Keep log short
+        if self.logs.len() > 50 { self.logs.remove(0); }
     }
 }
 
@@ -57,17 +57,14 @@ async fn run_rsync(state: Arc<Mutex<AppState>>) {
         s.config.clone()
     };
 
-    // Construct command
     let mut cmd = Command::new("rsync");
     cmd.arg("-avz").arg("--delete");
     for exc in &config.excludes {
         cmd.arg(format!("--exclude={}", exc));
     }
-    // Add trailing slash for rsync contents behavior
     cmd.arg(format!("{}/", config.source_dir)); 
     cmd.arg(format!("{}:{}", config.remote_host, config.remote_dir));
 
-    // Run command (blocking in thread, but we are in tokio spawn)
     let output = cmd.output();
 
     let mut s = state.lock().unwrap();
@@ -91,67 +88,112 @@ async fn run_rsync(state: Arc<Mutex<AppState>>) {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Load Config
+    // 1. Load Config
     let config_content = fs::read_to_string("config.yaml").expect("Failed to read config.yaml");
     let config: AppConfig = serde_yaml::from_str(&config_content).expect("Invalid YAML");
 
-    // Setup Terminal
+    // 2. Validate Path
+    let path_to_watch = std::fs::canonicalize(&config.source_dir)
+        .expect("❌ source_dir does not exist or is inaccessible!");
+
+    // 3. Setup Terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Shared State
+    // 4. Shared State
     let app_state = Arc::new(Mutex::new(AppState::new(config.clone())));
     
-    // Setup File Watcher Channel
+    // 5. Setup Channels
     let (tx, mut rx) = mpsc::channel(100);
     
-    // File Watcher Thread
-    let path_to_watch = config.source_dir.clone();
+    // --- STRATEGY 2: INITIAL SYNC ---
+    {
+        let state_clone = app_state.clone();
+        tokio::spawn(async move {
+            run_rsync(state_clone).await;
+        });
+    }
+
+    // --- STRATEGY 2: FAST LOOP (Root Metadata) ---
+    // Checks only the root folder every 1 second
+    let tx_fast = tx.clone();
+    let root_path = path_to_watch.clone();
+    
+    std::thread::spawn(move || {
+        let mut last_modified = None;
+        loop {
+            // Check mtime of the root folder
+            if let Ok(metadata) = std::fs::metadata(&root_path) {
+                if let Ok(modified) = metadata.modified() {
+                    // If mtime changed since last check, trigger sync
+                    if let Some(last) = last_modified {
+                        if modified != last {
+                             let _ = tx_fast.blocking_send(());
+                        }
+                    }
+                    last_modified = Some(modified);
+                }
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    });
+
+    // --- STRATEGY 2: SLOW LOOP (Deep Poll) ---
+    // Scans EVERYTHING every 30 seconds
+    let tx_slow = tx.clone();
+    let deep_path = path_to_watch.clone();
+    
     std::thread::spawn(move || {
         let (wt_tx, wt_rx) = std::sync::mpsc::channel();
-        let mut watcher = RecommendedWatcher::new(wt_tx, Config::default()).unwrap();
-        watcher.watch(std::path::Path::new(&path_to_watch), RecursiveMode::Recursive).unwrap();
-
+        
+        // 30 SECOND INTERVAL
+        let config = Config::default()
+            .with_poll_interval(Duration::from_secs(30)); 
+            
+        let mut watcher = match PollWatcher::new(wt_tx, config) {
+            Ok(w) => w,
+            Err(e) => { eprintln!("SlowWatcher Error: {:?}", e); return; }
+        };
+        if let Err(e) = watcher.watch(&deep_path, RecursiveMode::Recursive) {
+             eprintln!("SlowWatcher Watch Error: {:?}", e);
+             return;
+        }
         for res in wt_rx {
             match res {
-                Ok(_) => { let _ = tx.blocking_send(()); }, // Signal change
-                Err(e) => println!("watch error: {:?}", e),
+                Ok(_) => { let _ = tx_slow.blocking_send(()); },
+                Err(_) => {}, // Ignore errors in slow loop to avoid log spam
             }
         }
     });
 
-    // Main Loop
+    // 6. Main TUI Loop
     let mut debounce_timer: Option<tokio::time::Instant> = None;
     
     loop {
-        // 1. Draw UI
+        // Draw UI
         terminal.draw(|f| {
             let chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(30), Constraint::Percentage(70)].as_ref())
-                .split(f.size());
-
+                .split(f.area());
             let state = app_state.lock().unwrap();
-
-            // Left Panel (Status)
             let status_block = Paragraph::new(format!(
-                "Status: {}\nFiles Synced: {}\n\n[Q] to Quit\n[F] Force Sync", 
+                "Status: {}\nFiles Synced: {}\nStrategy: Hybrid (1s/30s)\n\n[Q] Quit  [F] Force", 
                 state.status, state.sync_count))
-                .block(Block::default().title("Control").borders(Borders::ALL));
+                .block(Block::default().title("Sync Commander").borders(Borders::ALL));
             f.render_widget(status_block, chunks[0]);
 
-            // Right Panel (Logs)
-            let logs: Vec<ListItem> = state.logs.iter().map(|s| ListItem::new(s.as_str())).collect();
+            let logs: Vec<ListItem> = state.logs.iter().rev().map(|s| ListItem::new(s.as_str())).collect();
             let log_list = List::new(logs)
                 .block(Block::default().title("Logs").borders(Borders::ALL))
                 .style(Style::default().fg(Color::White));
             f.render_widget(log_list, chunks[1]);
         })?;
 
-        // 2. Event Handling (Input & File Watch)
+        // Input Handling
         if crossterm::event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
@@ -165,15 +207,17 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        // 3. Check for File Changes (Debouncing)
+        // Handle Events from Fast or Slow Loops
         while let Ok(_) = rx.try_recv() {
-            // Reset timer on every event
+            // Debounce: Wait 2 seconds of silence before syncing
             debounce_timer = Some(tokio::time::Instant::now() + Duration::from_secs(2));
+
             let mut s = app_state.lock().unwrap();
-            s.status = "PENDING...".to_string();
+            if s.status != "SYNCING..." {
+                s.status = "PENDING...".to_string();
+            }
         }
 
-        // 4. Trigger Sync if timer expired
         if let Some(time) = debounce_timer {
             if tokio::time::Instant::now() >= time {
                 debounce_timer = None;
@@ -183,7 +227,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Restore Terminal
+    // Cleanup
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
