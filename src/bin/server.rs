@@ -1,93 +1,119 @@
-use std::{process::Command, time::Duration, sync::{Arc, Mutex}, fs};
+use std::{collections::HashMap, fs, process::Command, sync::{Arc, Mutex}, time::Duration};
 use std::os::unix::fs::PermissionsExt;
-use tokio::{net::UnixListener, io::{AsyncReadExt, AsyncWriteExt}};
+use tokio::{net::UnixListener, io::{AsyncReadExt, AsyncWriteExt}, sync::mpsc};
 use notify::{Config, PollWatcher, RecursiveMode, Watcher};
-use serde::Deserialize;
-use server_sync::protocol::ServerState;
+use server_sync::protocol::{SyncTask, ClientRequest, ServerResponse};
 
-// --- CONFIG & STATE ---
-#[derive(Debug, Deserialize, Clone)]
-struct AppConfig {
-    source_dir: String,
-    remote_host: String,
-    remote_dir: String,
-    #[serde(default)]
-    excludes: Vec<String>,
-    #[serde(default = "default_poll")]
-    poll_interval: u64,
+// --- SERVER STATE ---
+struct ServerState {
+    tasks: HashMap<String, SyncTask>, // Store task data
+    stoppers: HashMap<String, mpsc::Sender<()>>, // Channels to kill worker threads
 }
 
-fn default_poll() -> u64 { 30 }
+// --- SYNC WORKER ---
+// Spawns a dedicated thread for a single folder
+fn spawn_sync_worker(
+    task_data: SyncTask,
+    state_handle: Arc<Mutex<ServerState>>,
+) -> mpsc::Sender<()> {
+    let (tx_kill, mut rx_kill) = mpsc::channel(1);
+    let task_id = task_data.id.clone();
+    let source = task_data.source.clone();
+    let remote = task_data.remote.clone();
+    let interval = task_data.poll_interval;
 
-// Internal State
-struct AppState {
-    logs: Vec<String>,
-    status: String,
-    sync_count: u32,
-    config: AppConfig,
-}
+    tokio::spawn(async move {
+        // 1. Initial Sync
+        run_rsync(&task_id, &source, &remote, &state_handle).await;
 
-impl AppState {
-    fn new(config: AppConfig) -> Self {
-        Self {
-            logs: vec![format!("[{}] Daemon Started - Monitoring: {}", 
-                chrono::Local::now().format("%H:%M:%S"), config.source_dir)],
-            status: "IDLE".to_string(),
-            sync_count: 0,
-            config,
+        // 2. Setup Watcher
+        let (tx_file, mut rx_file) = mpsc::channel(100);
+        let path_clone = source.clone();
+
+        // Blocking Watcher Thread
+        std::thread::spawn(move || {
+            let (wt_tx, wt_rx) = std::sync::mpsc::channel();
+            let config = Config::default().with_poll_interval(Duration::from_secs(interval));
+            
+            if let Ok(mut watcher) = PollWatcher::new(wt_tx, config) {
+                if watcher.watch(std::path::Path::new(&path_clone), RecursiveMode::Recursive).is_ok() {
+                    for _ in wt_rx {
+                        if tx_file.blocking_send(()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        // 3. Event Loop
+        let mut debounce = None;
+        loop {
+            tokio::select! {
+                _ = rx_kill.recv() => {
+                    update_log(&task_id, "Stopped", &state_handle);
+                    break;
+                }
+                _ = rx_file.recv() => {
+                    update_status(&task_id, "PENDING...", &state_handle);
+                    update_log(&task_id, "📝 File change detected, debouncing...", &state_handle);
+                    debounce = Some(tokio::time::Instant::now() + Duration::from_secs(2));
+                }
+            }
+
+            if let Some(time) = debounce {
+                if tokio::time::Instant::now() >= time {
+                    debounce = None;
+                    run_rsync(&task_id, &source, &remote, &state_handle).await;
+                }
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-    }
+    });
 
-    fn add_log(&mut self, msg: String) {
-        let time = chrono::Local::now().format("%H:%M:%S");
-        self.logs.push(format!("[{}] {}", time, msg));
-        if self.logs.len() > 50 { self.logs.remove(0); }
-    }
-
-    fn to_server_state(&self) -> ServerState {
-        ServerState {
-            logs: self.logs.clone(),
-            status: self.status.clone(),
-            sync_count: self.sync_count,
-        }
-    }
+    tx_kill
 }
 
-// --- SYNC LOGIC ---
-async fn run_rsync(state: Arc<Mutex<AppState>>) {
-    let config = {
-        let mut s = state.lock().unwrap();
-        s.status = "SYNCING...".to_string();
-        s.add_log("🔄 Starting sync...".to_string());
-        s.config.clone()
-    };
+async fn run_rsync(id: &str, src: &str, remote: &str, state: &Arc<Mutex<ServerState>>) {
+    update_status(id, "SYNCING...", state);
+    update_log(id, "🔄 Starting sync...", state);
 
-    let mut cmd = Command::new("rsync");
-    cmd.arg("-avz").arg("--delete");
-    for exc in &config.excludes {
-        cmd.arg(format!("--exclude={}", exc));
-    }
-    cmd.arg(format!("{}/", config.source_dir)); 
-    cmd.arg(format!("{}:{}", config.remote_host, config.remote_dir));
+    let output = Command::new("rsync")
+        .arg("-avz")
+        .arg("--delete")
+        .arg(format!("{}/", src))
+        .arg(remote)
+        .output();
 
-    let output = cmd.output();
-
-    let mut s = state.lock().unwrap();
     match output {
-        Ok(out) if out.status.success() => {
-            s.add_log("✅ Sync Successful".to_string());
-            s.sync_count += 1;
-            s.status = "IDLE".to_string();
+        Ok(o) if o.status.success() => {
+            update_log(id, "✅ Sync Successful", state);
+            update_status(id, "IDLE", state);
         }
-        Ok(out) => {
-            let err_msg = String::from_utf8_lossy(&out.stderr);
-            s.add_log(format!("❌ Sync Failed: {}", err_msg));
-            s.status = "ERROR".to_string();
+        Ok(o) => {
+            let err_msg = String::from_utf8_lossy(&o.stderr);
+            update_log(id, &format!("❌ Sync Failed: {}", err_msg), state);
+            update_status(id, "ERROR", state);
         }
         Err(e) => {
-            s.add_log(format!("❌ Exec Error: {}", e));
-            s.status = "ERROR".to_string();
+            update_log(id, &format!("❌ Exec Error: {}", e), state);
+            update_status(id, "ERROR", state);
         }
+    }
+}
+
+fn update_status(id: &str, status: &str, state: &Arc<Mutex<ServerState>>) {
+    let mut s = state.lock().unwrap();
+    if let Some(t) = s.tasks.get_mut(id) {
+        t.status = status.to_string();
+    }
+}
+
+fn update_log(id: &str, log: &str, state: &Arc<Mutex<ServerState>>) {
+    let mut s = state.lock().unwrap();
+    if let Some(t) = s.tasks.get_mut(id) {
+        t.last_log = format!("[{}] {}", chrono::Local::now().format("%H:%M:%S"), log);
     }
 }
 
@@ -96,91 +122,11 @@ fn get_socket_path() -> String {
     format!("{}/.sync_daemon.sock", home)
 }
 
+// --- MAIN ---
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // 1. Load Config
-    let config_str = fs::read_to_string("config.yaml")?;
-    let config: AppConfig = serde_yaml::from_str(&config_str)?;
-    let path_to_watch = fs::canonicalize(&config.source_dir)?;
-
-    // 2. Initialize State
-    let app_state = Arc::new(Mutex::new(AppState::new(config.clone())));
-
-    // 3. Initial Sync
-    {
-        let s = app_state.clone();
-        tokio::spawn(async move { 
-            run_rsync(s).await; 
-        });
-    }
-
-    // 4. File Watcher Setup
-    let (tx_watch, mut rx_watch) = tokio::sync::mpsc::channel(100);
-    let interval = config.poll_interval;
-    let path_clone = path_to_watch.clone();
-
-    std::thread::spawn(move || {
-        let (wt_tx, wt_rx) = std::sync::mpsc::channel();
-        let notify_config = Config::default()
-            .with_poll_interval(Duration::from_secs(interval));
-        
-        let mut watcher = match PollWatcher::new(wt_tx, notify_config) {
-            Ok(w) => w,
-            Err(e) => {
-                eprintln!("PollWatcher Error: {:?}", e);
-                return;
-            }
-        };
-        
-        if let Err(e) = watcher.watch(&path_clone, RecursiveMode::Recursive) {
-            eprintln!("PollWatcher Watch Error: {:?}", e);
-            return;
-        }
-
-        for res in wt_rx {
-            match res {
-                Ok(_) => {
-                    let _ = tx_watch.blocking_send(());
-                }
-                Err(e) => {
-                    eprintln!("Watch error: {:?}", e);
-                }
-            }
-        }
-    });
-
-    // 5. Sync Trigger Logic (Debouncing)
-    let state_sync = app_state.clone();
-    tokio::spawn(async move {
-        let mut debounce = None;
-        loop {
-            // Check for file events
-            match rx_watch.try_recv() {
-                Ok(_) => {
-                    let mut s = state_sync.lock().unwrap();
-                    if s.status != "SYNCING..." {
-                        s.status = "PENDING...".to_string();
-                        s.add_log("📝 File change detected, debouncing...".to_string());
-                    }
-                    debounce = Some(tokio::time::Instant::now() + Duration::from_secs(2));
-                }
-                Err(_) => {}
-            }
-            
-            // Check Debounce Timer
-            if let Some(time) = debounce {
-                if tokio::time::Instant::now() >= time {
-                    debounce = None;
-                    run_rsync(state_sync.clone()).await;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    });
-
-    // 6. Unix Socket Server
     let socket_path = get_socket_path();
-    
+
     // Clean up old socket file if it exists
     if std::path::Path::new(&socket_path).exists() {
         fs::remove_file(&socket_path)?;
@@ -193,59 +139,106 @@ async fn main() -> anyhow::Result<()> {
     perms.set_mode(0o600);
     fs::set_permissions(&socket_path, perms)?;
 
-    println!("Daemon running on socket: {}", socket_path);
+    let state = Arc::new(Mutex::new(ServerState {
+        tasks: HashMap::new(),
+        stoppers: HashMap::new(),
+    }));
+
+    println!("Multi-Sync Server running on {}", socket_path);
     println!("Press Ctrl+C to stop");
 
-    // Handle client connections
     loop {
         match listener.accept().await {
-            Ok((mut stream, _)) => {
-                let state_conn = app_state.clone();
-                
+            Ok((mut socket, _)) => {
+                let state_ref = state.clone();
+
                 tokio::spawn(async move {
-                    let mut buf = vec![0; 1024];
-                    
+                    let mut buf = vec![0; 4096];
+
                     loop {
-                        // Send state to client
-                        let snapshot = {
-                            let s = state_conn.lock().unwrap();
-                            s.to_server_state()
+                        // Read Request
+                        let n = match socket.read(&mut buf).await {
+                            Ok(n) if n == 0 => break, // EOF
+                            Ok(n) => n,
+                            Err(_) => break,
                         };
-                        
-                        let json = match serde_json::to_string(&snapshot) {
-                            Ok(j) => j,
+
+                        let req: ClientRequest = match serde_json::from_slice(&buf[..n]) {
+                            Ok(r) => r,
                             Err(e) => {
-                                eprintln!("Serialization error: {}", e);
-                                break;
+                                eprintln!("Failed to parse request: {}", e);
+                                continue;
                             }
                         };
-                        
-                        // Send length prefix + JSON
-                        let data = format!("{}\n", json);
-                        if stream.write_all(data.as_bytes()).await.is_err() {
-                            break; // Client disconnected
-                        }
-                        
-                        // Try to read command from client (non-blocking check)
-                        match stream.try_read(&mut buf) {
-                            Ok(0) => break, // EOF
-                            Ok(n) => {
-                                // Parse command
-                                if let Ok(cmd_str) = String::from_utf8(buf[..n].to_vec()) {
-                                    if cmd_str.trim() == "F" || cmd_str.trim() == "ForceSync" {
-                                        let s = state_conn.clone();
-                                        tokio::spawn(async move {
-                                            run_rsync(s).await;
-                                        });
+
+                        // Process Request
+                        let resp = match req {
+                            ClientRequest::GetState => {
+                                let s = state_ref.lock().unwrap();
+                                let list: Vec<SyncTask> = s.tasks.values().cloned().collect();
+                                ServerResponse::State(list)
+                            }
+                            ClientRequest::ListLocalDirs(path) => {
+                                // BROWSER LOGIC: Read dir contents
+                                let p = if path.is_empty() {
+                                    "/".to_string()
+                                } else {
+                                    path
+                                };
+
+                                match fs::read_dir(&p) {
+                                    Ok(entries) => {
+                                        let dirs: Vec<String> = entries
+                                            .filter_map(|e| e.ok())
+                                            .filter(|e| e.path().is_dir())
+                                            .filter_map(|e| e.file_name().into_string().ok())
+                                            .collect();
+                                        ServerResponse::DirList(dirs)
                                     }
+                                    Err(e) => ServerResponse::Error(e.to_string()),
                                 }
                             }
-                            Err(_) => {
-                                // No data available, continue
+                            ClientRequest::StartTask(task) => {
+                                let task_id = task.id.clone();
+                                let mut s = state_ref.lock().unwrap();
+                                if !s.tasks.contains_key(&task_id) {
+                                    let task_clone = task.clone();
+                                    let stopper = spawn_sync_worker(task_clone, state_ref.clone());
+                                    s.tasks.insert(task_id.clone(), task);
+                                    s.stoppers.insert(task_id, stopper);
+                                    ServerResponse::Ack
+                                } else {
+                                    ServerResponse::Error(format!("Task {} already exists", task_id))
+                                }
+                            }
+                            ClientRequest::StopTask(id) => {
+                                let stopper = {
+                                    let mut s = state_ref.lock().unwrap();
+                                    s.stoppers.remove(&id)
+                                };
+                                
+                                if let Some(tx) = stopper {
+                                    let _ = tx.send(()).await; // Kill thread
+                                }
+                                
+                                let mut s = state_ref.lock().unwrap();
+                                s.tasks.remove(&id);
+                                ServerResponse::Ack
+                            }
+                        };
+
+                        // Send Response
+                        match serde_json::to_string(&resp) {
+                            Ok(json) => {
+                                if socket.write_all(json.as_bytes()).await.is_err() {
+                                    break; // Client disconnected
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Failed to serialize response: {}", e);
+                                break;
                             }
                         }
-                        
-                        tokio::time::sleep(Duration::from_millis(500)).await;
                     }
                 });
             }
@@ -255,4 +248,3 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 }
-
