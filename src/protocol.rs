@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 pub struct SyncTask {
     pub id: String,          // Unique ID (e.g., "task_1")
     pub source: String,      // Local Path
-    pub remote: String,      // Remote (user@host:/path)
+    pub remote_host: String, // Remote host (e.g., "user@host")
+    pub remote_path: String, // Remote path (e.g., "/path/to/destination")
     pub status: String,      // IDLE, SYNCING, ERROR, PENDING...
     pub last_log: String,
     pub poll_interval: u64,
@@ -16,6 +17,7 @@ pub struct SyncTask {
 pub enum ClientRequest {
     GetState,                        // "Tell me everything"
     ListLocalDirs(String),           // "What folders are in /home/user?"
+    ListRemoteDirs(String),          // "What folders are on remote server at path X?"
     StartTask(SyncTask),             // "Start syncing this new pair"
     StopTask(String),                // "Stop task with ID 'X'"
 }

@@ -8,6 +8,31 @@ use server_sync::protocol::{SyncTask, ClientRequest, ServerResponse};
 struct ServerState {
     tasks: HashMap<String, SyncTask>, // Store task data
     stoppers: HashMap<String, mpsc::Sender<()>>, // Channels to kill worker threads
+    remote_host: String, // Default remote host (e.g., "user@host")
+}
+
+// --- REMOTE DIRECTORY LISTING ---
+fn list_remote_dirs_ssh(remote_host: &str, path: &str) -> Vec<String> {
+    // Default to current directory if empty
+    let target_path = if path.is_empty() { "." } else { path };
+
+    // Run: ssh user@host "ls -1F --group-directories-first /path"
+    let output = Command::new("ssh")
+        .arg(remote_host)
+        .arg(format!("ls -1F --group-directories-first {}", target_path))
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => {
+            let raw = String::from_utf8_lossy(&o.stdout);
+            raw.lines()
+                .filter(|line| line.ends_with('/')) // Only show directories
+                .map(|line| line.replace("/", ""))   // Remove the trailing slash for display
+                .collect()
+        }
+        Ok(o) => vec![format!("SSH Error: {}", String::from_utf8_lossy(&o.stderr))],
+        Err(e) => vec![format!("Exec Error: {}", e)],
+    }
 }
 
 // --- SYNC WORKER ---
@@ -19,12 +44,13 @@ fn spawn_sync_worker(
     let (tx_kill, mut rx_kill) = mpsc::channel(1);
     let task_id = task_data.id.clone();
     let source = task_data.source.clone();
-    let remote = task_data.remote.clone();
+    let remote_host = task_data.remote_host.clone();
+    let remote_path = task_data.remote_path.clone();
     let interval = task_data.poll_interval;
 
     tokio::spawn(async move {
         // 1. Initial Sync
-        run_rsync(&task_id, &source, &remote, &state_handle).await;
+        run_rsync(&task_id, &source, &remote_host, &remote_path, &state_handle).await;
 
         // 2. Setup Watcher
         let (tx_file, mut rx_file) = mpsc::channel(100);
@@ -64,7 +90,7 @@ fn spawn_sync_worker(
             if let Some(time) = debounce {
                 if tokio::time::Instant::now() >= time {
                     debounce = None;
-                    run_rsync(&task_id, &source, &remote, &state_handle).await;
+                    run_rsync(&task_id, &source, &remote_host, &remote_path, &state_handle).await;
                 }
             }
 
@@ -75,15 +101,16 @@ fn spawn_sync_worker(
     tx_kill
 }
 
-async fn run_rsync(id: &str, src: &str, remote: &str, state: &Arc<Mutex<ServerState>>) {
+async fn run_rsync(id: &str, src: &str, remote_host: &str, remote_path: &str, state: &Arc<Mutex<ServerState>>) {
     update_status(id, "SYNCING...", state);
     update_log(id, "🔄 Starting sync...", state);
 
+    let full_remote = format!("{}:{}", remote_host, remote_path);
     let output = Command::new("rsync")
         .arg("-avz")
         .arg("--delete")
         .arg(format!("{}/", src))
-        .arg(remote)
+        .arg(&full_remote)
         .output();
 
     match output {
@@ -142,6 +169,7 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(Mutex::new(ServerState {
         tasks: HashMap::new(),
         stoppers: HashMap::new(),
+        remote_host: "hanlitian@remote".to_string(), // TODO: Read from config file
     }));
 
     println!("Multi-Sync Server running on {}", socket_path);
@@ -197,6 +225,16 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                     Err(e) => ServerResponse::Error(e.to_string()),
                                 }
+                            }
+                            ClientRequest::ListRemoteDirs(path) => {
+                                // Extract remote_host from state and release lock before blocking SSH call
+                                let host = {
+                                    let s = state_ref.lock().unwrap();
+                                    s.remote_host.clone()
+                                };
+                                
+                                let dirs = list_remote_dirs_ssh(&host, &path);
+                                ServerResponse::DirList(dirs)
                             }
                             ClientRequest::StartTask(task) => {
                                 let task_id = task.id.clone();

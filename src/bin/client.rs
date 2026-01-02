@@ -16,8 +16,8 @@ use server_sync::protocol::{SyncTask, ClientRequest, ServerResponse};
 // --- UI STATE ---
 enum AppMode {
     Dashboard,
-    Browser,
-    InputRemote,  // New mode for inputting remote
+    LocalBrowser,  // Browse local directories (source selection)
+    RemoteBrowser, // Browse remote directories (destination selection)
 }
 
 struct App {
@@ -27,9 +27,10 @@ struct App {
     current_path: String,
     dir_entries: Vec<String>,
     selected_idx: usize,
-    // New Task Input
-    input_remote: String, // We only browser local, remote is typed
-    input_cursor_pos: usize,  // Cursor position for editing
+    // Task Creation State
+    pending_source: String,        // Selected local path before remote browsing
+    remote_current_path: String,   // Current path in remote browser
+    pending_remote_host: String,   // Remote host (e.g., "user@host")
 }
 
 fn get_socket_path() -> String {
@@ -102,8 +103,9 @@ fn main() -> anyhow::Result<()> {
         current_path: "/storage/zhangkaiLab/hanlitian".to_string(), // Start here
         dir_entries: vec![],
         selected_idx: 0,
-        input_remote: String::new(),  // Start empty
-        input_cursor_pos: 0,
+        pending_source: String::new(),
+        remote_current_path: String::new(),
+        pending_remote_host: "hanlitian@remote".to_string(), // TODO: Read from config or get from server
     };
 
     loop {
@@ -131,7 +133,7 @@ fn main() -> anyhow::Result<()> {
                 .constraints([Constraint::Percentage(80), Constraint::Percentage(20)])
                 .split(size);
 
-            let items: Vec<ListItem> = app.tasks.iter().map(|t| {
+                let items: Vec<ListItem> = app.tasks.iter().map(|t| {
                 let color = match t.status.as_str() {
                     "IDLE" => Color::Green,
                     "ERROR" => Color::Red,
@@ -140,9 +142,10 @@ fn main() -> anyhow::Result<()> {
                     _ => Color::Blue,
                 };
 
+                let remote_display = format!("{}:{}", t.remote_host, t.remote_path);
                 ListItem::new(format!(
                     "ID: {} | {} -> {}\n   [{}] {}",
-                    t.id, t.source, t.remote, t.status, t.last_log
+                    t.id, t.source, remote_display, t.status, t.last_log
                 ))
                 .style(Style::default().fg(color))
             })
@@ -159,7 +162,7 @@ fn main() -> anyhow::Result<()> {
             f.render_widget(help, chunks[1]);
 
             // --- BROWSER POPUP ---
-            if let AppMode::Browser = app.mode {
+            if let AppMode::LocalBrowser | AppMode::RemoteBrowser = app.mode {
                 let area = centered_rect(60, 60, size);
                 f.render_widget(Clear, area); // Clear background
 
@@ -183,50 +186,32 @@ fn main() -> anyhow::Result<()> {
                     })
                     .collect();
 
+                // Different titles and instructions based on mode
+                let (title, instructions_text) = match app.mode {
+                    AppMode::LocalBrowser => (
+                        format!("Select Source Folder: {}", app.current_path),
+                        "[Enter] Enter Dir  [Space] Select as Source  [Esc] Cancel"
+                    ),
+                    AppMode::RemoteBrowser => (
+                        format!("Select Remote Destination: {}", 
+                            if app.remote_current_path.is_empty() { 
+                                format!("{}:/", app.pending_remote_host) 
+                            } else { 
+                                format!("{}:{}", app.pending_remote_host, app.remote_current_path) 
+                            }),
+                        "[Enter] Enter Dir  [Space] Select as Destination  [Esc] Cancel"
+                    ),
+                    _ => unreachable!(),
+                };
+
                 let b_block = Block::default()
-                    .title(format!("Browsing: {}", app.current_path))
+                    .title(title)
                     .borders(Borders::ALL);
                 f.render_widget(List::new(dirs).block(b_block), browser_chunks[0]);
 
-                let instructions = Paragraph::new(
-                    "[Enter] Enter Dir  [Space] Select as Source  [Esc] Cancel"
-                )
-                .block(Block::default().borders(Borders::ALL));
-                f.render_widget(instructions, browser_chunks[1]);
-            }
-
-            // --- INPUT REMOTE POPUP ---
-            if let AppMode::InputRemote = app.mode {
-                let area = centered_rect(70, 20, size);
-                f.render_widget(Clear, area);
-                
-                let input_chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(3), Constraint::Length(3)])
-                    .split(area);
-                
-                // Show the input field with cursor
-                let display_text = if app.input_cursor_pos <= app.input_remote.len() {
-                    if app.input_cursor_pos < app.input_remote.len() {
-                        format!("{}_{}", 
-                            &app.input_remote[..app.input_cursor_pos],
-                            &app.input_remote[app.input_cursor_pos..])
-                    } else {
-                        format!("{}_", app.input_remote)
-                    }
-                } else {
-                    format!("{}_", app.input_remote)
-                };
-                
-                let input_block = Paragraph::new(display_text)
-                    .block(Block::default()
-                        .title("Enter Remote (user@host:/path)")
-                        .borders(Borders::ALL));
-                f.render_widget(input_block, input_chunks[0]);
-                
-                let instructions = Paragraph::new("[Enter] Confirm  [Esc] Cancel")
+                let instructions = Paragraph::new(instructions_text)
                     .block(Block::default().borders(Borders::ALL));
-                f.render_widget(instructions, input_chunks[1]);
+                f.render_widget(instructions, browser_chunks[1]);
             }
         })?;
 
@@ -237,8 +222,8 @@ fn main() -> anyhow::Result<()> {
                     AppMode::Dashboard => match key.code {
                         KeyCode::Char('q') | KeyCode::Char('Q') => break,
                         KeyCode::Char('a') | KeyCode::Char('A') => {
-                            // Enter Browser Mode
-                            app.mode = AppMode::Browser;
+                            // Enter LocalBrowser Mode
+                            app.mode = AppMode::LocalBrowser;
                             match send_req(ClientRequest::ListLocalDirs(app.current_path.clone())) {
                                 ServerResponse::DirList(d) => {
                                     app.dir_entries = d;
@@ -260,7 +245,7 @@ fn main() -> anyhow::Result<()> {
                         }
                         _ => {}
                     },
-                    AppMode::Browser => match key.code {
+                    AppMode::LocalBrowser => match key.code {
                         KeyCode::Esc => app.mode = AppMode::Dashboard,
                         KeyCode::Down => {
                             if app.selected_idx < app.dir_entries.len().saturating_sub(1) {
@@ -299,78 +284,96 @@ fn main() -> anyhow::Result<()> {
                             }
                         }
                         KeyCode::Char(' ') => {
-                            // Switch to input mode to enter remote
-                            app.mode = AppMode::InputRemote;
-                            if app.input_remote.is_empty() {
-                                app.input_remote = "user@host:/path/to/destination".to_string();
-                                app.input_cursor_pos = app.input_remote.len();
-                            } else {
-                                app.input_cursor_pos = app.input_remote.len();
+                            // STEP 1 COMPLETE: Source Selected
+                            app.pending_source = app.current_path.clone();
+                            
+                            // Switch to Remote Browser
+                            app.mode = AppMode::RemoteBrowser;
+                            app.remote_current_path = String::new(); // Start at remote HOME
+                            
+                            // Fetch Remote Dirs
+                            match send_req(ClientRequest::ListRemoteDirs(app.remote_current_path.clone())) {
+                                ServerResponse::DirList(d) => {
+                                    app.dir_entries = d;
+                                    app.dir_entries.insert(0, "..".to_string());
+                                    app.selected_idx = 0;
+                                }
+                                ServerResponse::Error(e) => {
+                                    eprintln!("Error listing remote dirs: {}", e);
+                                    app.mode = AppMode::LocalBrowser;
+                                }
+                                _ => {}
                             }
                         }
                         _ => {}
                     },
-                    AppMode::InputRemote => match key.code {
-                        KeyCode::Esc => {
-                            app.mode = AppMode::Browser;  // Cancel, go back to browser
+                    AppMode::RemoteBrowser => match key.code {
+                        KeyCode::Esc => app.mode = AppMode::Dashboard, // Cancel
+                        KeyCode::Down => {
+                            if app.selected_idx < app.dir_entries.len().saturating_sub(1) {
+                                app.selected_idx += 1;
+                            }
+                        }
+                        KeyCode::Up => {
+                            if app.selected_idx > 0 {
+                                app.selected_idx -= 1;
+                            }
                         }
                         KeyCode::Enter => {
-                            // Confirm and create task
-                            if !app.input_remote.trim().is_empty() {
-                                let task_id = format!("task_{}", app.tasks.len() + 1);
-                                let new_task = SyncTask {
-                                    id: task_id,
-                                    source: app.current_path.clone(),
-                                    remote: app.input_remote.trim().to_string(),
-                                    status: "STARTING".to_string(),
-                                    last_log: "Created".to_string(),
-                                    poll_interval: 30,
-                                };
-                                
-                                match send_req(ClientRequest::StartTask(new_task)) {
-                                    ServerResponse::Ack => {
-                                        app.mode = AppMode::Dashboard;
-                                        app.input_remote.clear();
-                                        app.input_cursor_pos = 0;
-                                    }
-                                    ServerResponse::Error(e) => {
-                                        eprintln!("Error starting task: {}", e);
-                                    }
-                                    _ => {}
+                            // Navigate Remote Dir
+                            let selected = &app.dir_entries[app.selected_idx];
+                            let new_path = if selected == ".." {
+                                // Simple parent logic (string manipulation)
+                                let p = std::path::Path::new(&app.remote_current_path);
+                                p.parent().unwrap_or(std::path::Path::new("")).to_str().unwrap().to_string()
+                            } else {
+                                if app.remote_current_path.is_empty() {
+                                    selected.clone()
+                                } else {
+                                    format!("{}/{}", app.remote_current_path, selected)
                                 }
+                            };
+                            
+                            app.remote_current_path = new_path;
+                            
+                            // Fetch New Remote List
+                            match send_req(ClientRequest::ListRemoteDirs(app.remote_current_path.clone())) {
+                                ServerResponse::DirList(d) => {
+                                    app.dir_entries = d;
+                                    app.dir_entries.insert(0, "..".to_string());
+                                    app.selected_idx = 0;
+                                }
+                                ServerResponse::Error(e) => {
+                                    eprintln!("Error navigating remote: {}", e);
+                                }
+                                _ => {}
                             }
                         }
-                        KeyCode::Left => {
-                            if app.input_cursor_pos > 0 {
-                                app.input_cursor_pos -= 1;
+                        KeyCode::Char(' ') => {
+                            // STEP 2 COMPLETE: Remote Dest Selected
+                            let task_id = format!("task_{}", app.tasks.len() + 1);
+                            
+                            let new_task = SyncTask {
+                                id: task_id,
+                                source: app.pending_source.clone(),
+                                remote_host: app.pending_remote_host.clone(),
+                                remote_path: app.remote_current_path.clone(),
+                                status: "STARTING".to_string(),
+                                last_log: "Created".to_string(),
+                                poll_interval: 5,
+                            };
+                            
+                            match send_req(ClientRequest::StartTask(new_task)) {
+                                ServerResponse::Ack => {
+                                    app.mode = AppMode::Dashboard;
+                                    app.pending_source.clear();
+                                    app.remote_current_path.clear();
+                                }
+                                ServerResponse::Error(e) => {
+                                    eprintln!("Error starting task: {}", e);
+                                }
+                                _ => {}
                             }
-                        }
-                        KeyCode::Right => {
-                            if app.input_cursor_pos < app.input_remote.len() {
-                                app.input_cursor_pos += 1;
-                            }
-                        }
-                        KeyCode::Backspace => {
-                            if app.input_cursor_pos > 0 {
-                                app.input_remote.remove(app.input_cursor_pos - 1);
-                                app.input_cursor_pos -= 1;
-                            }
-                        }
-                        KeyCode::Delete => {
-                            if app.input_cursor_pos < app.input_remote.len() {
-                                app.input_remote.remove(app.input_cursor_pos);
-                            }
-                        }
-                        KeyCode::Home => {
-                            app.input_cursor_pos = 0;
-                        }
-                        KeyCode::End => {
-                            app.input_cursor_pos = app.input_remote.len();
-                        }
-                        KeyCode::Char(c) => {
-                            // Insert character at cursor
-                            app.input_remote.insert(app.input_cursor_pos, c);
-                            app.input_cursor_pos += 1;
                         }
                         _ => {}
                     }
