@@ -1,7 +1,8 @@
-use std::{collections::HashMap, fs, process::Command, sync::{Arc, Mutex}, time::Duration};
+use std::{collections::HashMap, fs, sync::{Arc, Mutex}, time::Duration};
 use std::os::unix::fs::PermissionsExt;
 use std::process::Stdio;
-use std::io::{BufRead, BufReader};
+use tokio::process::Command;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::{net::UnixListener, io::{AsyncReadExt, AsyncWriteExt}, sync::mpsc};
 use notify::{Config, PollWatcher, RecursiveMode, Watcher};
 use server_sync::protocol::{SyncTask, ClientRequest, ServerResponse, SyncMode};
@@ -40,10 +41,16 @@ fn is_valid_host(host: &str) -> bool {
 fn save_tasks(tasks: &HashMap<String, SyncTask>) -> std::io::Result<()> {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let path = format!("{}/.sync_daemon_tasks.json", home);
-    
+    let tmp_path = format!("{}/.sync_daemon_tasks.json.tmp", home); // Temp file
+
     let task_list: Vec<SyncTask> = tasks.values().cloned().collect();
     let json = serde_json::to_string_pretty(&task_list)?;
-    fs::write(path, json)?;
+
+    // 1. Write to temp file
+    fs::write(&tmp_path, json)?;
+    // 2. Atomic rename (overwrites old file instantly)
+    fs::rename(&tmp_path, &path)?;
+    
     Ok(())
 }
 
@@ -105,7 +112,7 @@ struct ServerState {
 }
 
 // --- REMOTE DIRECTORY LISTING ---
-fn list_remote_dirs_ssh(remote_host: &str, path: &str) -> Vec<String> {
+async fn list_remote_dirs_ssh(remote_host: &str, path: &str) -> Vec<String> {
     // SECURITY: Validate host before using in SSH command
     if !is_valid_host(remote_host) {
         return vec!["Error: Invalid remote host format".to_string()];
@@ -125,7 +132,8 @@ fn list_remote_dirs_ssh(remote_host: &str, path: &str) -> Vec<String> {
         .arg("-o").arg("ControlPersist=600")
         .arg(remote_host)
         .arg(format!("ls -1F --group-directories-first {}", target_path))
-        .output();
+        .output()
+        .await;
 
     match output {
         Ok(o) if o.status.success() => {
@@ -178,6 +186,7 @@ fn spawn_sync_worker(
 
         // 3. Event Loop
         let mut debounce = None;
+        
         loop {
             tokio::select! {
                 _ = rx_kill.recv() => {
@@ -185,20 +194,25 @@ fn spawn_sync_worker(
                     break;
                 }
                 _ = rx_file.recv() => {
-                    update_status(&task_id, "PENDING...", &state_handle);
-                    update_log(&task_id, "📝 File change detected, debouncing...", &state_handle);
-                    debounce = Some(tokio::time::Instant::now() + Duration::from_secs(2));
+                    // Only set debounce if we aren't already waiting
+                    // This creates a "grouping" window of 2 seconds
+                    if debounce.is_none() {
+                        update_status(&task_id, "PENDING...", &state_handle);
+                        update_log(&task_id, "📝 Change detected, waiting 2s...", &state_handle);
+                        debounce = Some(tokio::time::Instant::now() + Duration::from_secs(2));
+                    }
                 }
             }
 
             if let Some(time) = debounce {
                 if tokio::time::Instant::now() >= time {
-                    debounce = None;
+                    debounce = None; // Reset
                     retry_run_rsync(&task, &state_handle).await;
                 }
             }
-
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            
+            // Tiny sleep to prevent tight loop burning CPU
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     });
 
@@ -238,7 +252,7 @@ async fn retry_run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
 }
 
 // Dry run: Show what would change without making changes
-fn run_dry_run(task: &SyncTask) -> Vec<String> {
+async fn run_dry_run(task: &SyncTask) -> Vec<String> {
     // SECURITY: Validate host before using in rsync command
     if !is_valid_host(&task.remote_host) {
         return vec!["Error: Invalid remote host format".to_string()];
@@ -275,7 +289,7 @@ fn run_dry_run(task: &SyncTask) -> Vec<String> {
     cmd.arg(format!("{}/", task.source));
     cmd.arg(&full_remote);
     
-    match cmd.output() {
+    match cmd.output().await {
         Ok(o) if o.status.success() => {
             String::from_utf8_lossy(&o.stdout)
                 .lines()
@@ -300,7 +314,9 @@ async fn run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
 
     let full_remote = format!("{}:{}", task.remote_host, task.remote_path);
     
-    let mut cmd = Command::new("rsync");
+    let mut cmd = Command::new("rsync"); // Now tokio::process::Command
+    
+    cmd.kill_on_drop(true); // Safety: kill rsync if task is cancelled
     
     // Base flags: archive + verbose
     cmd.arg("-av");
@@ -359,30 +375,30 @@ async fn run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
 
     match cmd.spawn() {
         Ok(mut child) => {
-            // Read stdout in real-time
+            // ASYNC PROGRESS READING
             if let Some(stdout) = child.stdout.take() {
-                let reader = BufReader::new(stdout);
                 let task_id = task.id.clone();
                 let state_clone = state.clone();
                 
-                // Spawn blocking thread to read output
-                std::thread::spawn(move || {
-                    for line in reader.lines().flatten() {
+                // Spawn lightweight task to read lines asynchronously
+                tokio::spawn(async move {
+                    let mut reader = BufReader::new(stdout).lines();
+                    while let Ok(Some(line)) = reader.next_line().await {
                         if let Some(percent) = parse_rsync_percentage(&line) {
                             update_status(&task_id, &format!("SYNCING {}%", percent), &state_clone);
                         }
                     }
                 });
             }
-            
-            // Wait for completion
-            match child.wait() {
+
+            // NON-BLOCKING WAIT
+            match child.wait().await { // <--- The magic .await
                 Ok(status) if status.success() => {
                     update_log(&task.id, "✅ Sync Successful", state);
                     update_status(&task.id, "IDLE", state);
                 }
-                Ok(_) => {
-                    update_log(&task.id, "❌ Sync Failed", state);
+                Ok(status) => {
+                    update_log(&task.id, &format!("❌ Failed (Exit {})", status), state);
                     update_status(&task.id, "ERROR", state);
                 }
                 Err(e) => {
@@ -560,7 +576,7 @@ async fn main() -> anyhow::Result<()> {
                             }
                             ClientRequest::ListRemoteDirs(host, path) => {
                                 // Use the host from the client request (user's TUI input)
-                                let dirs = list_remote_dirs_ssh(&host, &path);
+                                let dirs = list_remote_dirs_ssh(&host, &path).await;
                                 ServerResponse::DirList(dirs)
                             }
                             ClientRequest::StartTask(task) => {
@@ -614,7 +630,7 @@ async fn main() -> anyhow::Result<()> {
                                 };
                                 
                                 if let Some(task) = task {
-                                    let changes = run_dry_run(&task);
+                                    let changes = run_dry_run(&task).await;
                                     ServerResponse::DryRunResult(changes)
                                 } else {
                                     ServerResponse::Error(format!("Task {} not found", task_id))

@@ -1,6 +1,7 @@
-use std::{io::{Read, Write}, os::unix::net::UnixStream, path::Path};
+use std::{io::{Read, Write}, os::unix::net::UnixStream, path::Path, panic, fs::File, sync::atomic::{AtomicBool, Ordering}};
+use simplelog::*;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -12,6 +13,9 @@ use ratatui::{
     Terminal,
 };
 use server_sync::protocol::{SyncTask, ClientRequest, ServerResponse, SyncMode};
+
+// Global flag for Ctrl+C
+static CTRL_C_PRESSED: AtomicBool = AtomicBool::new(false);
 
 // --- UI STATE ---
 enum AppMode {
@@ -105,12 +109,57 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 }
 
 fn main() -> anyhow::Result<()> {
+    // 0. Initialize Logging
+    WriteLogger::init(
+        LevelFilter::Info,
+        Config::default(),
+        File::create("client_debug.log")?,
+    )?;
+    
+    log::info!("Client starting...");
+
+    // 0.5. Setup Ctrl+C handler (BEFORE terminal setup)
+    ctrlc::set_handler(|| {
+        CTRL_C_PRESSED.store(true, Ordering::Relaxed);
+        // Try to restore terminal immediately
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen, crossterm::event::DisableMouseCapture);
+    })?;
+
+    // 1. Install Panic Hook (The Safety Net)
+    let original_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |panic_info| {
+        // Force-restore terminal before printing the error
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen, crossterm::event::DisableMouseCapture);
+        original_hook(panic_info);
+    }));
+
+    // 2. Setup Terminal
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    // 3. Run App (Wrapped to catch errors)
+    let res = run_app(&mut terminal);
+
+    // 4. Cleanup (Always runs, even if error occurs)
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    terminal.show_cursor()?;
+
+    // 5. Print Error if any
+    if let Err(err) = res {
+        eprintln!("❌ Application Error: {:?}", err);
+    }
+
+    Ok(())
+}
+
+// Extract main loop into separate function
+fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::Result<()> {
     let mut app = App {
         mode: AppMode::Dashboard,
         tasks: vec![],
@@ -146,6 +195,12 @@ fn main() -> anyhow::Result<()> {
     }
 
     loop {
+        // Check for Ctrl+C signal
+        if CTRL_C_PRESSED.load(Ordering::Relaxed) {
+            log::info!("Ctrl+C received, exiting...");
+            break;
+        }
+
         // 1. DATA FETCH - Only update task state when viewing Dashboard
         if matches!(app.mode, AppMode::Dashboard) {
             match send_req(ClientRequest::GetState) {
@@ -240,7 +295,7 @@ fn main() -> anyhow::Result<()> {
                         "[Enter] Enter Dir  [Space] Select as Source  [Esc] Cancel"
                     ),
                     AppMode::RemoteBrowser => (
-                        format!("Select Remote Destination: {}", 
+                        format!("Select Remote Destination: {} (Interface may freeze during SSH)", 
                             if app.remote_current_path.is_empty() { 
                                 format!("{}:/", app.pending_remote_host) 
                             } else { 
@@ -382,11 +437,17 @@ fn main() -> anyhow::Result<()> {
                     .block(Block::default().borders(Borders::ALL));
                 f.render_widget(help, dry_chunks[1]);
             }
-        })?;
+        }).map_err(|_e| anyhow::anyhow!("Terminal draw error"))?;
 
         // 3. INPUT - Reduced timeout for responsive typing
         if crossterm::event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
+                // Handle Ctrl+C explicitly (backup to signal handler)
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                    log::info!("Ctrl+C pressed, exiting...");
+                    break;
+                }
+                
                 match app.mode {
                     AppMode::Dashboard => match key.code {
                         KeyCode::Char('q') | KeyCode::Char('Q') => break,
@@ -674,10 +735,6 @@ fn main() -> anyhow::Result<()> {
 
         // No extra sleep needed - poll() provides timing control
     }
-
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
-    terminal.show_cursor()?;
 
     Ok(())
 }
