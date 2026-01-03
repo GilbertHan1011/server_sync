@@ -1,9 +1,65 @@
 use std::{collections::HashMap, fs, process::Command, sync::{Arc, Mutex}, time::Duration};
 use std::os::unix::fs::PermissionsExt;
+use std::process::Stdio;
+use std::io::{BufRead, BufReader};
 use tokio::{net::UnixListener, io::{AsyncReadExt, AsyncWriteExt}, sync::mpsc};
 use notify::{Config, PollWatcher, RecursiveMode, Watcher};
-use server_sync::protocol::{SyncTask, ClientRequest, ServerResponse};
+use server_sync::protocol::{SyncTask, ClientRequest, ServerResponse, SyncMode};
 use serde::Deserialize;
+use clap::Parser;
+use daemonize::Daemonize;
+use regex::Regex;
+
+// --- CLI ARGUMENTS ---
+#[derive(Parser)]
+#[command(name = "server_sync")]
+#[command(about = "File synchronization daemon server", long_about = None)]
+struct ServerArgs {
+    /// Path to configuration file
+    #[arg(short, long, default_value = "server_config.yaml")]
+    config: String,
+    
+    /// Path to log file (stdout if not provided)
+    #[arg(short, long)]
+    log: Option<String>,
+    
+    /// Run in foreground instead of daemonizing
+    #[arg(short, long)]
+    foreground: bool,
+}
+
+// --- PERSISTENCE FUNCTIONS ---
+fn save_tasks(tasks: &HashMap<String, SyncTask>) -> std::io::Result<()> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let path = format!("{}/.sync_daemon_tasks.json", home);
+    
+    let task_list: Vec<SyncTask> = tasks.values().cloned().collect();
+    let json = serde_json::to_string_pretty(&task_list)?;
+    fs::write(path, json)?;
+    Ok(())
+}
+
+fn load_tasks() -> HashMap<String, SyncTask> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let path = format!("{}/.sync_daemon_tasks.json", home);
+    
+    if let Ok(content) = fs::read_to_string(&path) {
+        if let Ok(list) = serde_json::from_str::<Vec<SyncTask>>(&content) {
+            println!("Loaded {} tasks from {}", list.len(), path);
+            return list.into_iter().map(|t| (t.id.clone(), t)).collect();
+        }
+    }
+    HashMap::new()
+}
+
+// --- PROGRESS PARSING ---
+fn parse_rsync_percentage(line: &str) -> Option<u32> {
+    // rsync --info=progress2 format: "   1,234,567  12%  123.45kB/s    0:00:12"
+    let re = Regex::new(r"\s+(\d+)%").ok()?;
+    re.captures(line)
+        .and_then(|cap| cap.get(1))
+        .and_then(|m| m.as_str().parse::<u32>().ok())
+}
 
 // --- SERVER CONFIG ---
 #[derive(Debug, Deserialize, Clone)]
@@ -11,8 +67,7 @@ struct ServerConfig {
     remote_host: String,
 }
 
-fn load_server_config() -> ServerConfig {
-    let config_path = "server_config.yaml";
+fn load_server_config(config_path: &str) -> ServerConfig {
     match fs::read_to_string(config_path) {
         Ok(content) => {
             match serde_yaml::from_str(&content) {
@@ -47,7 +102,11 @@ fn list_remote_dirs_ssh(remote_host: &str, path: &str) -> Vec<String> {
     let target_path = if path.is_empty() { "." } else { path };
 
     // Run: ssh user@host "ls -1F --group-directories-first /path"
+    // Use ControlMaster for connection reuse
     let output = Command::new("ssh")
+        .arg("-o").arg("ControlMaster=auto")
+        .arg("-o").arg("ControlPath=~/.ssh/sockets/%r@%h-%p")
+        .arg("-o").arg("ControlPersist=600")
         .arg(remote_host)
         .arg(format!("ls -1F --group-directories-first {}", target_path))
         .output();
@@ -74,13 +133,12 @@ fn spawn_sync_worker(
     let (tx_kill, mut rx_kill) = mpsc::channel(1);
     let task_id = task_data.id.clone();
     let source = task_data.source.clone();
-    let remote_host = task_data.remote_host.clone();
-    let remote_path = task_data.remote_path.clone();
     let interval = task_data.poll_interval;
+    let task = Arc::new(task_data); // Wrap in Arc for sharing
 
     tokio::spawn(async move {
         // 1. Initial Sync
-        run_rsync(&task_id, &source, &remote_host, &remote_path, &state_handle).await;
+        run_rsync(&task, &state_handle).await;
 
         // 2. Setup Watcher
         let (tx_file, mut rx_file) = mpsc::channel(100);
@@ -120,7 +178,7 @@ fn spawn_sync_worker(
             if let Some(time) = debounce {
                 if tokio::time::Instant::now() >= time {
                     debounce = None;
-                    run_rsync(&task_id, &source, &remote_host, &remote_path, &state_handle).await;
+                    run_rsync(&task, &state_handle).await;
                 }
             }
 
@@ -131,31 +189,95 @@ fn spawn_sync_worker(
     tx_kill
 }
 
-async fn run_rsync(id: &str, src: &str, remote_host: &str, remote_path: &str, state: &Arc<Mutex<ServerState>>) {
-    update_status(id, "SYNCING...", state);
-    update_log(id, "🔄 Starting sync...", state);
+async fn run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
+    update_status(&task.id, "SYNCING 0%", state);
+    update_log(&task.id, "🔄 Starting sync...", state);
 
-    let full_remote = format!("{}:{}", remote_host, remote_path);
-    let output = Command::new("rsync")
-        .arg("-avz")
-        .arg("--delete")
-        .arg(format!("{}/", src))
-        .arg(&full_remote)
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => {
-            update_log(id, "✅ Sync Successful", state);
-            update_status(id, "IDLE", state);
+    let full_remote = format!("{}:{}", task.remote_host, task.remote_path);
+    
+    let mut cmd = Command::new("rsync");
+    
+    // Base flags: archive + verbose
+    cmd.arg("-av");
+    
+    // Progress tracking
+    cmd.arg("--info=progress2");
+    cmd.arg("--no-inc-recursive");
+    
+    // SSH with ControlMaster for connection reuse
+    cmd.arg("-e").arg("ssh -o ControlMaster=auto -o ControlPath=~/.ssh/sockets/%r@%h-%p -o ControlPersist=600");
+    
+    // Compression
+    if task.compress {
+        cmd.arg("-z");
+    }
+    
+    // Sync mode specific flags
+    match task.sync_mode {
+        SyncMode::Mirror => {
+            cmd.arg("--delete");
         }
-        Ok(o) => {
-            let err_msg = String::from_utf8_lossy(&o.stderr);
-            update_log(id, &format!("❌ Sync Failed: {}", err_msg), state);
-            update_status(id, "ERROR", state);
+        SyncMode::AddOnly => {
+            // No delete flags - only add/update files
+        }
+        SyncMode::SafeSync => {
+            cmd.arg("--delete");
+            cmd.arg("--backup");
+            cmd.arg("--backup-dir=.rsync-backup");
+        }
+        SyncMode::Update => {
+            cmd.arg("--update");
+        }
+    }
+    
+    // Respect .gitignore files
+    cmd.arg("--filter=:- .gitignore");
+    
+    // Paths
+    cmd.arg(format!("{}/", task.source));
+    cmd.arg(&full_remote);
+    
+    // Stream output for real-time progress
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    match cmd.spawn() {
+        Ok(mut child) => {
+            // Read stdout in real-time
+            if let Some(stdout) = child.stdout.take() {
+                let reader = BufReader::new(stdout);
+                let task_id = task.id.clone();
+                let state_clone = state.clone();
+                
+                // Spawn blocking thread to read output
+                std::thread::spawn(move || {
+                    for line in reader.lines().flatten() {
+                        if let Some(percent) = parse_rsync_percentage(&line) {
+                            update_status(&task_id, &format!("SYNCING {}%", percent), &state_clone);
+                        }
+                    }
+                });
+            }
+            
+            // Wait for completion
+            match child.wait() {
+                Ok(status) if status.success() => {
+                    update_log(&task.id, "✅ Sync Successful", state);
+                    update_status(&task.id, "IDLE", state);
+                }
+                Ok(_) => {
+                    update_log(&task.id, "❌ Sync Failed", state);
+                    update_status(&task.id, "ERROR", state);
+                }
+                Err(e) => {
+                    update_log(&task.id, &format!("❌ Process Error: {}", e), state);
+                    update_status(&task.id, "ERROR", state);
+                }
+            }
         }
         Err(e) => {
-            update_log(id, &format!("❌ Exec Error: {}", e), state);
-            update_status(id, "ERROR", state);
+            update_log(&task.id, &format!("❌ Exec Error: {}", e), state);
+            update_status(&task.id, "ERROR", state);
         }
     }
 }
@@ -182,10 +304,51 @@ fn get_socket_path() -> String {
 // --- MAIN ---
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Parse command-line arguments
+    let args = ServerArgs::parse();
+    
+    // Daemonize if not in foreground mode
+    if !args.foreground {
+        let mut daemon = Daemonize::new()
+            .pid_file("/tmp/server_sync.pid")
+            .working_directory(".");
+        
+        // Setup log file redirection if provided
+        if let Some(ref log_path) = args.log {
+            match fs::File::create(log_path) {
+                Ok(log_file) => {
+                    daemon = daemon
+                        .stdout(log_file.try_clone()?)
+                        .stderr(log_file);
+                    eprintln!("Daemonizing with log file: {}", log_path);
+                }
+                Err(e) => {
+                    eprintln!("Failed to create log file {}: {}", log_path, e);
+                    eprintln!("Continuing without log file redirection");
+                }
+            }
+        }
+        
+        eprintln!("Starting server daemon...");
+        eprintln!("PID will be written to /tmp/server_sync.pid");
+        
+        match daemon.start() {
+            Ok(_) => {
+                // We're now in daemon mode
+            }
+            Err(e) => {
+                eprintln!("Failed to daemonize: {}", e);
+                return Err(e.into());
+            }
+        }
+    } else {
+        println!("Running in foreground mode");
+    }
+    
     let socket_path = get_socket_path();
 
     // Load configuration
-    let config = load_server_config();
+    let config = load_server_config(&args.config);
     println!("Loaded config: remote_host = {}", config.remote_host);
 
     // Clean up old socket file if it exists
@@ -205,6 +368,21 @@ async fn main() -> anyhow::Result<()> {
         stoppers: HashMap::new(),
         remote_host: config.remote_host,
     }));
+
+    // Ensure SSH control sockets directory exists
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let socket_dir = format!("{}/.ssh/sockets", home);
+    let _ = fs::create_dir_all(&socket_dir);
+
+    // Load persisted tasks and spawn workers
+    let loaded_tasks = load_tasks();
+    for (task_id, task_data) in loaded_tasks {
+        let tx_kill = spawn_sync_worker(task_data.clone(), state.clone());
+        let mut state_lock = state.lock().unwrap();
+        state_lock.tasks.insert(task_id.clone(), task_data);
+        state_lock.stoppers.insert(task_id, tx_kill);
+    }
+    println!("Restored {} tasks from disk", state.lock().unwrap().tasks.len());
 
     println!("Multi-Sync Server running on {}", socket_path);
     println!("Press Ctrl+C to stop");
@@ -277,6 +455,12 @@ async fn main() -> anyhow::Result<()> {
                                     let stopper = spawn_sync_worker(task_clone, state_ref.clone());
                                     s.tasks.insert(task_id.clone(), task);
                                     s.stoppers.insert(task_id, stopper);
+                                    
+                                    // Save tasks to disk
+                                    if let Err(e) = save_tasks(&s.tasks) {
+                                        eprintln!("Warning: Failed to save tasks: {}", e);
+                                    }
+                                    
                                     ServerResponse::Ack
                                 } else {
                                     ServerResponse::Error(format!("Task {} already exists", task_id))
@@ -294,6 +478,12 @@ async fn main() -> anyhow::Result<()> {
                                 
                                 let mut s = state_ref.lock().unwrap();
                                 s.tasks.remove(&id);
+                                
+                                // Save tasks to disk
+                                if let Err(e) = save_tasks(&s.tasks) {
+                                    eprintln!("Warning: Failed to save tasks: {}", e);
+                                }
+                                
                                 ServerResponse::Ack
                             }
                         };

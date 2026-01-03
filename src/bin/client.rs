@@ -11,13 +11,14 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
     Terminal,
 };
-use server_sync::protocol::{SyncTask, ClientRequest, ServerResponse};
+use server_sync::protocol::{SyncTask, ClientRequest, ServerResponse, SyncMode};
 
 // --- UI STATE ---
 enum AppMode {
     Dashboard,
     LocalBrowser,     // Browse local directories (source selection)
     RemoteHostInput,  // Edit remote host before browsing remote
+    SyncModeSelect,   // Select sync mode (Mirror, AddOnly, SafeSync, Update)
     RemoteBrowser,    // Browse remote directories (destination selection)
 }
 
@@ -35,6 +36,10 @@ struct App {
     // Remote Host Input State
     input_remote_host: String,     // User's edited remote host
     input_cursor_pos: usize,       // Cursor position in input field
+    // Sync Mode Selection State
+    pending_sync_mode: SyncMode,   // Selected sync mode
+    pending_compress: bool,        // Compression enabled
+    sync_mode_selected_idx: usize, // 0-3 for the 4 modes
 }
 
 fn get_socket_path() -> String {
@@ -112,6 +117,9 @@ fn main() -> anyhow::Result<()> {
         pending_remote_host: String::new(), // Will be fetched from server
         input_remote_host: String::new(),
         input_cursor_pos: 0,
+        pending_sync_mode: SyncMode::Mirror, // Default: Mirror mode
+        pending_compress: true,               // Default: Enable compression
+        sync_mode_selected_idx: 0,           // Start at first option
     };
 
     // Fetch remote host from server on startup
@@ -166,9 +174,17 @@ fn main() -> anyhow::Result<()> {
                 };
 
                 let remote_display = format!("{}:{}", t.remote_host, t.remote_path);
+                let mode_name = match t.sync_mode {
+                    SyncMode::Mirror => "Mirror",
+                    SyncMode::AddOnly => "AddOnly",
+                    SyncMode::SafeSync => "SafeSync",
+                    SyncMode::Update => "Update",
+                };
+                let compress_flag = if t.compress { "+Z" } else { "" };
+                
                 ListItem::new(format!(
-                    "ID: {} | {} -> {}\n   [{}] {}",
-                    t.id, t.source, remote_display, t.status, t.last_log
+                    "ID: {} | {} -> {}\n   [{}] Mode: {}{} | {}",
+                    t.id, t.source, remote_display, t.status, mode_name, compress_flag, t.last_log
                 ))
                 .style(Style::default().fg(color))
             })
@@ -179,7 +195,7 @@ fn main() -> anyhow::Result<()> {
             f.render_widget(list, chunks[0]);
 
             let help = Paragraph::new(
-                "Controls:\n[A] Add New Task (3-step wizard)\n[D] Delete Task (First ID)\n[Q] Quit"
+                "Controls:\n[A] Add New Task (4-step wizard)\n[D] Delete Task (First ID)\n[Q] Quit"
             )
             .block(Block::default().borders(Borders::ALL));
             f.render_widget(help, chunks[1]);
@@ -273,6 +289,62 @@ fn main() -> anyhow::Result<()> {
                     .block(Block::default().borders(Borders::ALL));
                 f.render_widget(instructions, input_chunks[1]);
             }
+
+            // --- SYNC MODE SELECT POPUP ---
+            if let AppMode::SyncModeSelect = app.mode {
+                let area = centered_rect(70, 50, size);
+                f.render_widget(Clear, area);
+                
+                let sync_chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Min(10), Constraint::Length(3)])
+                    .split(area);
+                
+                // Mode descriptions
+                let modes = vec![
+                    ("Mirror", "Exact copy. Deletes files on remote if missing on local", Color::Yellow),
+                    ("Add Only", "Uploads new/changed files. Never deletes on remote", Color::Green),
+                    ("Safe Sync", "Mirrors but moves deleted files to .rsync-backup folder", Color::Cyan),
+                    ("Update", "Only overwrites if local file is newer", Color::Blue),
+                ];
+                
+                let mut mode_items: Vec<ListItem> = vec![];
+                for (idx, (name, desc, color)) in modes.iter().enumerate() {
+                    let prefix = if idx == app.sync_mode_selected_idx { "> " } else { "  " };
+                    let text = format!("{}{}", prefix, name);
+                    let item = if idx == app.sync_mode_selected_idx {
+                        ListItem::new(vec![
+                            ratatui::text::Line::from(text).style(Style::default().fg(*color).bg(Color::DarkGray)),
+                            ratatui::text::Line::from(format!("  {}", desc)).style(Style::default().fg(Color::Gray)),
+                        ])
+                    } else {
+                        ListItem::new(vec![
+                            ratatui::text::Line::from(text).style(Style::default().fg(*color)),
+                            ratatui::text::Line::from(format!("  {}", desc)).style(Style::default().fg(Color::DarkGray)),
+                        ])
+                    };
+                    mode_items.push(item);
+                }
+                
+                // Add compression toggle
+                let compress_text = if app.pending_compress {
+                    "[X] Enable Compression (-z)"
+                } else {
+                    "[ ] Enable Compression (-z)"
+                };
+                mode_items.push(ListItem::new(""));
+                mode_items.push(ListItem::new(compress_text).style(Style::default().fg(Color::White)));
+                
+                let mode_list = List::new(mode_items)
+                    .block(Block::default()
+                        .title("Step 3: Select Sync Mode")
+                        .borders(Borders::ALL));
+                f.render_widget(mode_list, sync_chunks[0]);
+                
+                let instructions = Paragraph::new("[Enter] Continue  [↑↓] Navigate  [Space] Toggle Compress  [Esc] Back")
+                    .block(Block::default().borders(Borders::ALL));
+                f.render_widget(instructions, sync_chunks[1]);
+            }
         })?;
 
         // 3. INPUT - Reduced timeout for responsive typing
@@ -363,26 +435,9 @@ fn main() -> anyhow::Result<()> {
                             // Update pending_remote_host with the edited value
                             app.pending_remote_host = app.input_remote_host.trim().to_string();
                             
-                            // Switch to Remote Browser
-                            app.mode = AppMode::RemoteBrowser;
-                            app.remote_current_path = String::new(); // Start at remote HOME
-                            
-                            // Fetch Remote Dirs using the host from user input
-                            match send_req(ClientRequest::ListRemoteDirs(
-                                app.pending_remote_host.clone(),
-                                app.remote_current_path.clone()
-                            )) {
-                                ServerResponse::DirList(d) => {
-                                    app.dir_entries = d;
-                                    app.dir_entries.insert(0, "..".to_string());
-                                    app.selected_idx = 0;
-                                }
-                                ServerResponse::Error(e) => {
-                                    eprintln!("Error listing remote dirs: {}", e);
-                                    app.mode = AppMode::RemoteHostInput;
-                                }
-                                _ => {}
-                            }
+                            // Switch to Sync Mode Select
+                            app.mode = AppMode::SyncModeSelect;
+                            app.sync_mode_selected_idx = 0; // Reset to first mode
                         }
                         KeyCode::Left => {
                             if app.input_cursor_pos > 0 {
@@ -415,6 +470,58 @@ fn main() -> anyhow::Result<()> {
                             // Insert character at cursor
                             app.input_remote_host.insert(app.input_cursor_pos, c);
                             app.input_cursor_pos += 1;
+                        }
+                        _ => {}
+                    },
+                    AppMode::SyncModeSelect => match key.code {
+                        KeyCode::Esc => {
+                            app.mode = AppMode::RemoteHostInput;  // Go back
+                        }
+                        KeyCode::Down => {
+                            if app.sync_mode_selected_idx < 3 {  // 0-3 for 4 modes
+                                app.sync_mode_selected_idx += 1;
+                            }
+                        }
+                        KeyCode::Up => {
+                            if app.sync_mode_selected_idx > 0 {
+                                app.sync_mode_selected_idx -= 1;
+                            }
+                        }
+                        KeyCode::Char(' ') => {
+                            // Toggle compression
+                            app.pending_compress = !app.pending_compress;
+                        }
+                        KeyCode::Enter => {
+                            // STEP 3 COMPLETE: Sync Mode Selected
+                            // Save the selected mode
+                            app.pending_sync_mode = match app.sync_mode_selected_idx {
+                                0 => SyncMode::Mirror,
+                                1 => SyncMode::AddOnly,
+                                2 => SyncMode::SafeSync,
+                                3 => SyncMode::Update,
+                                _ => SyncMode::Mirror,
+                            };
+                            
+                            // Switch to Remote Browser
+                            app.mode = AppMode::RemoteBrowser;
+                            app.remote_current_path = String::new(); // Start at remote HOME
+                            
+                            // Fetch Remote Dirs using the host from user input
+                            match send_req(ClientRequest::ListRemoteDirs(
+                                app.pending_remote_host.clone(),
+                                app.remote_current_path.clone()
+                            )) {
+                                ServerResponse::DirList(d) => {
+                                    app.dir_entries = d;
+                                    app.dir_entries.insert(0, "..".to_string());
+                                    app.selected_idx = 0;
+                                }
+                                ServerResponse::Error(e) => {
+                                    eprintln!("Error listing remote dirs: {}", e);
+                                    app.mode = AppMode::SyncModeSelect;
+                                }
+                                _ => {}
+                            }
                         }
                         _ => {}
                     },
@@ -464,7 +571,7 @@ fn main() -> anyhow::Result<()> {
                             }
                         }
                         KeyCode::Char(' ') => {
-                            // STEP 2 COMPLETE: Remote Dest Selected
+                            // STEP 4 COMPLETE: Remote Dest Selected
                             let task_id = format!("task_{}", app.tasks.len() + 1);
                             
                             let new_task = SyncTask {
@@ -475,6 +582,8 @@ fn main() -> anyhow::Result<()> {
                                 status: "STARTING".to_string(),
                                 last_log: "Created".to_string(),
                                 poll_interval: 5,
+                                sync_mode: app.pending_sync_mode.clone(),
+                                compress: app.pending_compress,
                             };
                             
                             match send_req(ClientRequest::StartTask(new_task)) {

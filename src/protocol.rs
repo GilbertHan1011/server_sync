@@ -1,5 +1,14 @@
 use serde::{Deserialize, Serialize};
 
+/// Sync mode determines how rsync handles file synchronization
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub enum SyncMode {
+    Mirror,      // --delete: Exact copy, deletes files on remote if missing on local
+    AddOnly,     // No delete: Only adds/updates, never deletes
+    SafeSync,    // --delete --backup --backup-dir: Moves deleted files to backup
+    Update,      // --update: Only overwrites if local file is newer
+}
+
 /// A single sync task
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SyncTask {
@@ -10,6 +19,8 @@ pub struct SyncTask {
     pub status: String,      // IDLE, SYNCING, ERROR, PENDING...
     pub last_log: String,
     pub poll_interval: u64,
+    pub sync_mode: SyncMode, // How to sync (Mirror, AddOnly, etc.)
+    pub compress: bool,      // Enable compression (-z flag)
 }
 
 /// Commands the Client sends to Server
