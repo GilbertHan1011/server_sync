@@ -434,12 +434,12 @@ fn get_socket_path() -> String {
 }
 
 // --- MAIN ---
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+// Synchronous main - daemonize BEFORE tokio runtime
+fn main() -> anyhow::Result<()> {
     // Parse command-line arguments
     let args = ServerArgs::parse();
     
-    // Daemonize if not in foreground mode
+    // Daemonize if not in foreground mode (BEFORE tokio runtime)
     if !args.foreground {
         let mut daemon = Daemonize::new()
             .pid_file("/tmp/server_sync.pid")
@@ -466,7 +466,7 @@ async fn main() -> anyhow::Result<()> {
         
         match daemon.start() {
             Ok(_) => {
-                // We're now in daemon mode
+                // We're now in daemon mode - NOW create tokio runtime
             }
             Err(e) => {
                 eprintln!("Failed to daemonize: {}", e);
@@ -476,6 +476,14 @@ async fn main() -> anyhow::Result<()> {
     } else {
         println!("Running in foreground mode");
     }
+    
+    // Create tokio runtime AFTER daemonization (if any)
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(run_server(args))
+}
+
+// Async server logic - runs AFTER daemonization
+async fn run_server(args: ServerArgs) -> anyhow::Result<()> {
     
     let socket_path = get_socket_path();
 
@@ -669,4 +677,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+    // Unreachable - loop runs forever, but required for return type
+    #[allow(unreachable_code)]
+    Ok(())
 }

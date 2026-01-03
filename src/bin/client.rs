@@ -72,7 +72,9 @@ fn send_req(req: ClientRequest) -> ServerResponse {
 
             let json = match serde_json::to_string(&req) {
                 Ok(j) => j,
-                Err(e) => return ServerResponse::Error(format!("Serialization error: {}", e)),
+                Err(e) => {
+                    return ServerResponse::Error(format!("Serialization error: {}", e));
+                }
             };
             
             if stream.write_all(json.as_bytes()).is_err() {
@@ -85,7 +87,9 @@ fn send_req(req: ClientRequest) -> ServerResponse {
                     log::info!("Received response ({} bytes)", n); // Log success
                     match serde_json::from_slice(&buf[..n]) {
                         Ok(resp) => resp,
-                        Err(e) => ServerResponse::Error(format!("Parse error: {}", e)),
+                        Err(e) => {
+                            ServerResponse::Error(format!("Parse error: {}", e))
+                        }
                     }
                 }
                 Ok(_) => ServerResponse::Error("Empty response".to_string()),
@@ -174,10 +178,13 @@ fn main() -> anyhow::Result<()> {
 
 // Extract main loop into separate function
 fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::Result<()> {
+    let start_path = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| std::env::var("HOME").unwrap_or_else(|_| "/".to_string()));
     let mut app = App {
         mode: AppMode::Dashboard,
         tasks: vec![],
-        current_path: "/storage/zhangkaiLab/hanlitian".to_string(), // Start here
+        current_path: start_path, // Start here
         dir_entries: vec![],
         selected_idx: 0,
         pending_source: String::new(),
