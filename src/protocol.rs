@@ -16,8 +16,9 @@ pub struct SyncTask {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ClientRequest {
     GetState,                        // "Tell me everything"
+    GetRemoteHost,                   // "What is the default remote host?"
     ListLocalDirs(String),           // "What folders are in /home/user?"
-    ListRemoteDirs(String),          // "What folders are on remote server at path X?"
+    ListRemoteDirs(String, String),  // "What folders are on remote server at path X?" (host, path)
     StartTask(SyncTask),             // "Start syncing this new pair"
     StopTask(String),                // "Stop task with ID 'X'"
 }
@@ -26,6 +27,7 @@ pub enum ClientRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ServerResponse {
     State(Vec<SyncTask>),            // List of all active tasks
+    RemoteHost(String),              // The default remote host
     DirList(Vec<String>),            // List of subdirectories
     Ack,                             // "Okay, done"
     Error(String),

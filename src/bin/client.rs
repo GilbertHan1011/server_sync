@@ -16,8 +16,9 @@ use server_sync::protocol::{SyncTask, ClientRequest, ServerResponse};
 // --- UI STATE ---
 enum AppMode {
     Dashboard,
-    LocalBrowser,  // Browse local directories (source selection)
-    RemoteBrowser, // Browse remote directories (destination selection)
+    LocalBrowser,     // Browse local directories (source selection)
+    RemoteHostInput,  // Edit remote host before browsing remote
+    RemoteBrowser,    // Browse remote directories (destination selection)
 }
 
 struct App {
@@ -31,6 +32,9 @@ struct App {
     pending_source: String,        // Selected local path before remote browsing
     remote_current_path: String,   // Current path in remote browser
     pending_remote_host: String,   // Remote host (e.g., "user@host")
+    // Remote Host Input State
+    input_remote_host: String,     // User's edited remote host
+    input_cursor_pos: usize,       // Cursor position in input field
 }
 
 fn get_socket_path() -> String {
@@ -105,22 +109,41 @@ fn main() -> anyhow::Result<()> {
         selected_idx: 0,
         pending_source: String::new(),
         remote_current_path: String::new(),
-        pending_remote_host: "hanlitian@remote".to_string(), // TODO: Read from config or get from server
+        pending_remote_host: String::new(), // Will be fetched from server
+        input_remote_host: String::new(),
+        input_cursor_pos: 0,
     };
 
+    // Fetch remote host from server on startup
+    match send_req(ClientRequest::GetRemoteHost) {
+        ServerResponse::RemoteHost(host) => {
+            app.pending_remote_host = host;
+        }
+        ServerResponse::Error(e) => {
+            eprintln!("Warning: Could not fetch remote host from server: {}", e);
+            app.pending_remote_host = "user@remote".to_string(); // Fallback
+        }
+        _ => {
+            eprintln!("Warning: Unexpected response when fetching remote host");
+            app.pending_remote_host = "user@remote".to_string(); // Fallback
+        }
+    }
+
     loop {
-        // 1. DATA FETCH
-        match send_req(ClientRequest::GetState) {
-            ServerResponse::State(t) => {
-                app.tasks = t;
-            }
-            ServerResponse::Error(e) => {
-                // If daemon not running, show error but don't crash
-                if e.contains("not running") {
-                    app.tasks = vec![];
+        // 1. DATA FETCH - Only update task state when viewing Dashboard
+        if matches!(app.mode, AppMode::Dashboard) {
+            match send_req(ClientRequest::GetState) {
+                ServerResponse::State(t) => {
+                    app.tasks = t;
                 }
+                ServerResponse::Error(e) => {
+                    // If daemon not running, show error but don't crash
+                    if e.contains("not running") {
+                        app.tasks = vec![];
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         }
 
         // 2. RENDER
@@ -156,7 +179,7 @@ fn main() -> anyhow::Result<()> {
             f.render_widget(list, chunks[0]);
 
             let help = Paragraph::new(
-                "Controls:\n[A] Add New Task (Browse)\n[D] Delete Task (First ID)\n[Q] Quit"
+                "Controls:\n[A] Add New Task (3-step wizard)\n[D] Delete Task (First ID)\n[Q] Quit"
             )
             .block(Block::default().borders(Borders::ALL));
             f.render_widget(help, chunks[1]);
@@ -213,10 +236,47 @@ fn main() -> anyhow::Result<()> {
                     .block(Block::default().borders(Borders::ALL));
                 f.render_widget(instructions, browser_chunks[1]);
             }
+
+            // --- REMOTE HOST INPUT POPUP ---
+            if let AppMode::RemoteHostInput = app.mode {
+                let area = centered_rect(70, 25, size);
+                f.render_widget(Clear, area);
+                
+                let input_chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(5), Constraint::Length(3)])
+                    .split(area);
+                
+                // Show the input field with cursor
+                let display_text = if app.input_cursor_pos <= app.input_remote_host.len() {
+                    if app.input_cursor_pos < app.input_remote_host.len() {
+                        format!("{}|{}", 
+                            &app.input_remote_host[..app.input_cursor_pos],
+                            &app.input_remote_host[app.input_cursor_pos..])
+                    } else {
+                        format!("{}|", app.input_remote_host)
+                    }
+                } else {
+                    format!("{}|", app.input_remote_host)
+                };
+                
+                let input_block = Paragraph::new(format!(
+                    "Remote Host (user@hostname):\n\n{}",
+                    display_text
+                ))
+                    .block(Block::default()
+                        .title("Step 2: Confirm/Edit Remote Host")
+                        .borders(Borders::ALL));
+                f.render_widget(input_block, input_chunks[0]);
+                
+                let instructions = Paragraph::new("[Enter] Continue  [Esc] Back  [←→] Move  [Home/End] Jump")
+                    .block(Block::default().borders(Borders::ALL));
+                f.render_widget(instructions, input_chunks[1]);
+            }
         })?;
 
-        // 3. INPUT
-        if crossterm::event::poll(std::time::Duration::from_millis(100))? {
+        // 3. INPUT - Reduced timeout for responsive typing
+        if crossterm::event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 match app.mode {
                     AppMode::Dashboard => match key.code {
@@ -287,12 +347,31 @@ fn main() -> anyhow::Result<()> {
                             // STEP 1 COMPLETE: Source Selected
                             app.pending_source = app.current_path.clone();
                             
+                            // Switch to Remote Host Input
+                            app.mode = AppMode::RemoteHostInput;
+                            app.input_remote_host = app.pending_remote_host.clone(); // Pre-fill with default
+                            app.input_cursor_pos = app.input_remote_host.len();
+                        }
+                        _ => {}
+                    },
+                    AppMode::RemoteHostInput => match key.code {
+                        KeyCode::Esc => {
+                            app.mode = AppMode::LocalBrowser;  // Go back to local browser
+                        }
+                        KeyCode::Enter => {
+                            // STEP 2 COMPLETE: Remote Host Confirmed
+                            // Update pending_remote_host with the edited value
+                            app.pending_remote_host = app.input_remote_host.trim().to_string();
+                            
                             // Switch to Remote Browser
                             app.mode = AppMode::RemoteBrowser;
                             app.remote_current_path = String::new(); // Start at remote HOME
                             
-                            // Fetch Remote Dirs
-                            match send_req(ClientRequest::ListRemoteDirs(app.remote_current_path.clone())) {
+                            // Fetch Remote Dirs using the host from user input
+                            match send_req(ClientRequest::ListRemoteDirs(
+                                app.pending_remote_host.clone(),
+                                app.remote_current_path.clone()
+                            )) {
                                 ServerResponse::DirList(d) => {
                                     app.dir_entries = d;
                                     app.dir_entries.insert(0, "..".to_string());
@@ -300,10 +379,42 @@ fn main() -> anyhow::Result<()> {
                                 }
                                 ServerResponse::Error(e) => {
                                     eprintln!("Error listing remote dirs: {}", e);
-                                    app.mode = AppMode::LocalBrowser;
+                                    app.mode = AppMode::RemoteHostInput;
                                 }
                                 _ => {}
                             }
+                        }
+                        KeyCode::Left => {
+                            if app.input_cursor_pos > 0 {
+                                app.input_cursor_pos -= 1;
+                            }
+                        }
+                        KeyCode::Right => {
+                            if app.input_cursor_pos < app.input_remote_host.len() {
+                                app.input_cursor_pos += 1;
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            if app.input_cursor_pos > 0 {
+                                app.input_remote_host.remove(app.input_cursor_pos - 1);
+                                app.input_cursor_pos -= 1;
+                            }
+                        }
+                        KeyCode::Delete => {
+                            if app.input_cursor_pos < app.input_remote_host.len() {
+                                app.input_remote_host.remove(app.input_cursor_pos);
+                            }
+                        }
+                        KeyCode::Home => {
+                            app.input_cursor_pos = 0;
+                        }
+                        KeyCode::End => {
+                            app.input_cursor_pos = app.input_remote_host.len();
+                        }
+                        KeyCode::Char(c) => {
+                            // Insert character at cursor
+                            app.input_remote_host.insert(app.input_cursor_pos, c);
+                            app.input_cursor_pos += 1;
                         }
                         _ => {}
                     },
@@ -336,8 +447,11 @@ fn main() -> anyhow::Result<()> {
                             
                             app.remote_current_path = new_path;
                             
-                            // Fetch New Remote List
-                            match send_req(ClientRequest::ListRemoteDirs(app.remote_current_path.clone())) {
+                            // Fetch New Remote List using the host from user input
+                            match send_req(ClientRequest::ListRemoteDirs(
+                                app.pending_remote_host.clone(),
+                                app.remote_current_path.clone()
+                            )) {
                                 ServerResponse::DirList(d) => {
                                     app.dir_entries = d;
                                     app.dir_entries.insert(0, "..".to_string());
@@ -381,8 +495,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        // Small delay to avoid excessive CPU usage
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        // No extra sleep needed - poll() provides timing control
     }
 
     disable_raw_mode()?;

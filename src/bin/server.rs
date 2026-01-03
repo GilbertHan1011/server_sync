@@ -3,6 +3,36 @@ use std::os::unix::fs::PermissionsExt;
 use tokio::{net::UnixListener, io::{AsyncReadExt, AsyncWriteExt}, sync::mpsc};
 use notify::{Config, PollWatcher, RecursiveMode, Watcher};
 use server_sync::protocol::{SyncTask, ClientRequest, ServerResponse};
+use serde::Deserialize;
+
+// --- SERVER CONFIG ---
+#[derive(Debug, Deserialize, Clone)]
+struct ServerConfig {
+    remote_host: String,
+}
+
+fn load_server_config() -> ServerConfig {
+    let config_path = "server_config.yaml";
+    match fs::read_to_string(config_path) {
+        Ok(content) => {
+            match serde_yaml::from_str(&content) {
+                Ok(config) => config,
+                Err(e) => {
+                    eprintln!("Failed to parse {}: {}. Using default config.", config_path, e);
+                    ServerConfig {
+                        remote_host: "user@remote".to_string(),
+                    }
+                }
+            }
+        }
+        Err(_) => {
+            eprintln!("Config file {} not found. Using default config.", config_path);
+            ServerConfig {
+                remote_host: "user@remote".to_string(),
+            }
+        }
+    }
+}
 
 // --- SERVER STATE ---
 struct ServerState {
@@ -154,6 +184,10 @@ fn get_socket_path() -> String {
 async fn main() -> anyhow::Result<()> {
     let socket_path = get_socket_path();
 
+    // Load configuration
+    let config = load_server_config();
+    println!("Loaded config: remote_host = {}", config.remote_host);
+
     // Clean up old socket file if it exists
     if std::path::Path::new(&socket_path).exists() {
         fs::remove_file(&socket_path)?;
@@ -169,7 +203,7 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(Mutex::new(ServerState {
         tasks: HashMap::new(),
         stoppers: HashMap::new(),
-        remote_host: "hanlitian@remote".to_string(), // TODO: Read from config file
+        remote_host: config.remote_host,
     }));
 
     println!("Multi-Sync Server running on {}", socket_path);
@@ -206,6 +240,10 @@ async fn main() -> anyhow::Result<()> {
                                 let list: Vec<SyncTask> = s.tasks.values().cloned().collect();
                                 ServerResponse::State(list)
                             }
+                            ClientRequest::GetRemoteHost => {
+                                let s = state_ref.lock().unwrap();
+                                ServerResponse::RemoteHost(s.remote_host.clone())
+                            }
                             ClientRequest::ListLocalDirs(path) => {
                                 // BROWSER LOGIC: Read dir contents
                                 let p = if path.is_empty() {
@@ -226,13 +264,8 @@ async fn main() -> anyhow::Result<()> {
                                     Err(e) => ServerResponse::Error(e.to_string()),
                                 }
                             }
-                            ClientRequest::ListRemoteDirs(path) => {
-                                // Extract remote_host from state and release lock before blocking SSH call
-                                let host = {
-                                    let s = state_ref.lock().unwrap();
-                                    s.remote_host.clone()
-                                };
-                                
+                            ClientRequest::ListRemoteDirs(host, path) => {
+                                // Use the host from the client request (user's TUI input)
                                 let dirs = list_remote_dirs_ssh(&host, &path);
                                 ServerResponse::DirList(dirs)
                             }
