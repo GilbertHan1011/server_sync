@@ -3,7 +3,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::process::Stdio;
 use tokio::process::Command;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::{net::UnixListener, io::{AsyncReadExt, AsyncWriteExt}, sync::mpsc};
+use tokio::{net::UnixListener, io::{AsyncReadExt, AsyncWriteExt}, sync::mpsc, fs as tokio_fs};
 use notify::{Config, PollWatcher, RecursiveMode, Watcher};
 use server_sync::protocol::{SyncTask, ClientRequest, ServerResponse, SyncMode};
 use serde::Deserialize;
@@ -38,7 +38,7 @@ fn is_valid_host(host: &str) -> bool {
 }
 
 // --- PERSISTENCE FUNCTIONS ---
-fn save_tasks(tasks: &HashMap<String, SyncTask>) -> std::io::Result<()> {
+async fn save_tasks(tasks: &HashMap<String, SyncTask>) -> std::io::Result<()> {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let path = format!("{}/.sync_daemon_tasks.json", home);
     let tmp_path = format!("{}/.sync_daemon_tasks.json.tmp", home); // Temp file
@@ -46,10 +46,10 @@ fn save_tasks(tasks: &HashMap<String, SyncTask>) -> std::io::Result<()> {
     let task_list: Vec<SyncTask> = tasks.values().cloned().collect();
     let json = serde_json::to_string_pretty(&task_list)?;
 
-    // 1. Write to temp file
-    fs::write(&tmp_path, json)?;
-    // 2. Atomic rename (overwrites old file instantly)
-    fs::rename(&tmp_path, &path)?;
+    // 1. Write to temp file (ASYNC)
+    tokio_fs::write(&tmp_path, json).await?;
+    // 2. Atomic rename (overwrites old file instantly) (ASYNC)
+    tokio_fs::rename(&tmp_path, &path).await?;
     
     Ok(())
 }
@@ -555,20 +555,25 @@ async fn main() -> anyhow::Result<()> {
                                 ServerResponse::RemoteHost(s.remote_host.clone())
                             }
                             ClientRequest::ListLocalDirs(path) => {
-                                // BROWSER LOGIC: Read dir contents
+                                // BROWSER LOGIC: Read dir contents (ASYNC)
                                 let p = if path.is_empty() {
                                     "/".to_string()
                                 } else {
                                     path
                                 };
 
-                                match fs::read_dir(&p) {
-                                    Ok(entries) => {
-                                        let dirs: Vec<String> = entries
-                                            .filter_map(|e| e.ok())
-                                            .filter(|e| e.path().is_dir())
-                                            .filter_map(|e| e.file_name().into_string().ok())
-                                            .collect();
+                                match tokio_fs::read_dir(&p).await {
+                                    Ok(mut entries) => {
+                                        let mut dirs = Vec::new();
+                                        while let Ok(Some(entry)) = entries.next_entry().await {
+                                            if let Ok(metadata) = entry.metadata().await {
+                                                if metadata.is_dir() {
+                                                    if let Ok(name) = entry.file_name().into_string() {
+                                                        dirs.push(name);
+                                                    }
+                                                }
+                                            }
+                                        }
                                         ServerResponse::DirList(dirs)
                                     }
                                     Err(e) => ServerResponse::Error(e.to_string()),
@@ -592,10 +597,13 @@ async fn main() -> anyhow::Result<()> {
                                         s.tasks.insert(task_id.clone(), task);
                                         s.stoppers.insert(task_id, stopper);
                                         
-                                        // Save tasks to disk
-                                        if let Err(e) = save_tasks(&s.tasks) {
-                                            eprintln!("Warning: Failed to save tasks: {}", e);
-                                        }
+                                        // Save tasks to disk (ASYNC - spawn to avoid blocking)
+                                        let tasks_to_save = s.tasks.clone();
+                                        tokio::spawn(async move {
+                                            if let Err(e) = save_tasks(&tasks_to_save).await {
+                                                eprintln!("Warning: Failed to save tasks: {}", e);
+                                            }
+                                        });
                                         
                                         ServerResponse::Ack
                                     } else {
@@ -616,10 +624,13 @@ async fn main() -> anyhow::Result<()> {
                                 let mut s = state_ref.lock().unwrap();
                                 s.tasks.remove(&id);
                                 
-                                // Save tasks to disk
-                                if let Err(e) = save_tasks(&s.tasks) {
-                                    eprintln!("Warning: Failed to save tasks: {}", e);
-                                }
+                                // Save tasks to disk (ASYNC - spawn to avoid blocking)
+                                let tasks_to_save = s.tasks.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = save_tasks(&tasks_to_save).await {
+                                        eprintln!("Warning: Failed to save tasks: {}", e);
+                                    }
+                                });
                                 
                                 ServerResponse::Ack
                             }
