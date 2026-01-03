@@ -32,6 +32,7 @@ pub enum ClientRequest {
     ListRemoteDirs(String, String),  // "What folders are on remote server at path X?" (host, path)
     StartTask(SyncTask),             // "Start syncing this new pair"
     StopTask(String),                // "Stop task with ID 'X'"
+    DryRun(String),                  // "Show what would change for task X (dry run)"
 }
 
 /// Responses the Server sends back
@@ -42,4 +43,5 @@ pub enum ServerResponse {
     DirList(Vec<String>),            // List of subdirectories
     Ack,                             // "Okay, done"
     Error(String),
+    DryRunResult(Vec<String>),       // List of file changes from dry run
 }

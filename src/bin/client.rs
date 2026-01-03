@@ -20,6 +20,7 @@ enum AppMode {
     RemoteHostInput,  // Edit remote host before browsing remote
     SyncModeSelect,   // Select sync mode (Mirror, AddOnly, SafeSync, Update)
     RemoteBrowser,    // Browse remote directories (destination selection)
+    DryRunView,       // Display dry run results
 }
 
 struct App {
@@ -40,6 +41,10 @@ struct App {
     pending_sync_mode: SyncMode,   // Selected sync mode
     pending_compress: bool,        // Compression enabled
     sync_mode_selected_idx: usize, // 0-3 for the 4 modes
+    // Dry Run State
+    dry_run_results: Vec<String>,  // Results from dry run
+    dry_run_task_id: String,       // Which task was dry-run
+    dry_run_scroll: usize,         // Scroll position in dry run view
 }
 
 fn get_socket_path() -> String {
@@ -120,6 +125,9 @@ fn main() -> anyhow::Result<()> {
         pending_sync_mode: SyncMode::Mirror, // Default: Mirror mode
         pending_compress: true,               // Default: Enable compression
         sync_mode_selected_idx: 0,           // Start at first option
+        dry_run_results: vec![],
+        dry_run_task_id: String::new(),
+        dry_run_scroll: 0,
     };
 
     // Fetch remote host from server on startup
@@ -195,7 +203,7 @@ fn main() -> anyhow::Result<()> {
             f.render_widget(list, chunks[0]);
 
             let help = Paragraph::new(
-                "Controls:\n[A] Add New Task (4-step wizard)\n[D] Delete Task (First ID)\n[Q] Quit"
+                "Controls:\n[A] Add New Task (4-step wizard)\n[D] Delete Task (First ID)\n[R] Dry Run (First Task)\n[Q] Quit"
             )
             .block(Block::default().borders(Borders::ALL));
             f.render_widget(help, chunks[1]);
@@ -345,6 +353,35 @@ fn main() -> anyhow::Result<()> {
                     .block(Block::default().borders(Borders::ALL));
                 f.render_widget(instructions, sync_chunks[1]);
             }
+
+            // --- DRY RUN VIEW POPUP ---
+            if let AppMode::DryRunView = app.mode {
+                let area = centered_rect(80, 60, size);
+                f.render_widget(Clear, area);
+                
+                let dry_chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Min(10), Constraint::Length(3)])
+                    .split(area);
+                
+                // Create list items from dry run results
+                let items: Vec<ListItem> = app.dry_run_results
+                    .iter()
+                    .skip(app.dry_run_scroll)
+                    .take(area.height as usize - 5) // Leave space for title and help
+                    .map(|s| ListItem::new(s.as_str()))
+                    .collect();
+                
+                let list = List::new(items)
+                    .block(Block::default()
+                        .title(format!("Dry Run Results: {}", app.dry_run_task_id))
+                        .borders(Borders::ALL));
+                f.render_widget(list, dry_chunks[0]);
+                
+                let help = Paragraph::new("[Esc] Close  [↑↓] Scroll")
+                    .block(Block::default().borders(Borders::ALL));
+                f.render_widget(help, dry_chunks[1]);
+            }
         })?;
 
         // 3. INPUT - Reduced timeout for responsive typing
@@ -373,6 +410,23 @@ fn main() -> anyhow::Result<()> {
                             // Quick hack: delete first task
                             if let Some(t) = app.tasks.first() {
                                 send_req(ClientRequest::StopTask(t.id.clone()));
+                            }
+                        }
+                        KeyCode::Char('r') | KeyCode::Char('R') => {
+                            // Dry run first task
+                            if let Some(first_task) = app.tasks.first() {
+                                match send_req(ClientRequest::DryRun(first_task.id.clone())) {
+                                    ServerResponse::DryRunResult(changes) => {
+                                        app.dry_run_results = changes;
+                                        app.dry_run_task_id = first_task.id.clone();
+                                        app.dry_run_scroll = 0;
+                                        app.mode = AppMode::DryRunView;
+                                    }
+                                    ServerResponse::Error(e) => {
+                                        eprintln!("Dry run error: {}", e);
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
                         _ => {}
@@ -596,6 +650,20 @@ fn main() -> anyhow::Result<()> {
                                     eprintln!("Error starting task: {}", e);
                                 }
                                 _ => {}
+                            }
+                        }
+                        _ => {}
+                    },
+                    AppMode::DryRunView => match key.code {
+                        KeyCode::Esc => app.mode = AppMode::Dashboard,
+                        KeyCode::Down => {
+                            if app.dry_run_scroll < app.dry_run_results.len().saturating_sub(1) {
+                                app.dry_run_scroll += 1;
+                            }
+                        }
+                        KeyCode::Up => {
+                            if app.dry_run_scroll > 0 {
+                                app.dry_run_scroll -= 1;
                             }
                         }
                         _ => {}

@@ -28,6 +28,14 @@ struct ServerArgs {
     foreground: bool,
 }
 
+// --- SECURITY: INPUT VALIDATION ---
+fn is_valid_host(host: &str) -> bool {
+    // Only allow alphanumeric, dots, hyphens, and one '@'
+    // This prevents SSH flag injection (e.g. -oProxyCommand)
+    let re = Regex::new(r"^[a-zA-Z0-9.-]+(@[a-zA-Z0-9.-]+)?$").unwrap();
+    re.is_match(host)
+}
+
 // --- PERSISTENCE FUNCTIONS ---
 fn save_tasks(tasks: &HashMap<String, SyncTask>) -> std::io::Result<()> {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
@@ -98,12 +106,20 @@ struct ServerState {
 
 // --- REMOTE DIRECTORY LISTING ---
 fn list_remote_dirs_ssh(remote_host: &str, path: &str) -> Vec<String> {
+    // SECURITY: Validate host before using in SSH command
+    if !is_valid_host(remote_host) {
+        return vec!["Error: Invalid remote host format".to_string()];
+    }
+
     // Default to current directory if empty
     let target_path = if path.is_empty() { "." } else { path };
 
     // Run: ssh user@host "ls -1F --group-directories-first /path"
-    // Use ControlMaster for connection reuse
+    // OPTIMIZED SSH: Uses ControlMaster and AES-GCM cipher for speed
     let output = Command::new("ssh")
+        .arg("-T")  // Disable pseudo-tty (faster)
+        .arg("-c").arg("aes128-gcm@openssh.com")  // Fastest hardware cipher
+        .arg("-o").arg("Compression=no")  // Don't compress directory listings
         .arg("-o").arg("ControlMaster=auto")
         .arg("-o").arg("ControlPath=~/.ssh/sockets/%r@%h-%p")
         .arg("-o").arg("ControlPersist=600")
@@ -137,8 +153,8 @@ fn spawn_sync_worker(
     let task = Arc::new(task_data); // Wrap in Arc for sharing
 
     tokio::spawn(async move {
-        // 1. Initial Sync
-        run_rsync(&task, &state_handle).await;
+        // 1. Initial Sync with Retry
+        retry_run_rsync(&task, &state_handle).await;
 
         // 2. Setup Watcher
         let (tx_file, mut rx_file) = mpsc::channel(100);
@@ -178,7 +194,7 @@ fn spawn_sync_worker(
             if let Some(time) = debounce {
                 if tokio::time::Instant::now() >= time {
                     debounce = None;
-                    run_rsync(&task, &state_handle).await;
+                    retry_run_rsync(&task, &state_handle).await;
                 }
             }
 
@@ -189,7 +205,96 @@ fn spawn_sync_worker(
     tx_kill
 }
 
+// Wrapper to handle Retries with exponential backoff
+async fn retry_run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
+    let mut attempts = 0;
+    const MAX_RETRIES: u32 = 3;
+
+    while attempts < MAX_RETRIES {
+        run_rsync(task, state).await;
+        
+        // Check if success
+        let success = {
+            let s = state.lock().unwrap();
+            if let Some(t) = s.tasks.get(&task.id) {
+                t.status == "IDLE"
+            } else { 
+                false 
+            }
+        };
+
+        if success { 
+            return; 
+        }
+
+        attempts += 1;
+        if attempts < MAX_RETRIES {
+            let wait = Duration::from_secs(2u64.pow(attempts));
+            update_log(&task.id, &format!("⚠️ Retry {}/{} in {}s...", attempts, MAX_RETRIES, wait.as_secs()), state);
+            tokio::time::sleep(wait).await;
+        }
+    }
+    update_status(&task.id, "ERROR (Max Retries)", state);
+}
+
+// Dry run: Show what would change without making changes
+fn run_dry_run(task: &SyncTask) -> Vec<String> {
+    // SECURITY: Validate host before using in rsync command
+    if !is_valid_host(&task.remote_host) {
+        return vec!["Error: Invalid remote host format".to_string()];
+    }
+
+    let full_remote = format!("{}:{}", task.remote_host, task.remote_path);
+    let mut cmd = Command::new("rsync");
+    
+    cmd.arg("-avn"); // -n = dry run, -a = archive, -v = verbose
+    cmd.arg("--itemize-changes"); // Show detailed changes
+    
+    // Use same SSH optimization
+    let ssh_cmd = "ssh -T -c aes128-gcm@openssh.com -o Compression=no -o ControlMaster=auto -o ControlPath=~/.ssh/sockets/%r@%h-%p -o ControlPersist=600";
+    cmd.arg("-e").arg(ssh_cmd);
+    
+    if task.compress { 
+        cmd.arg("-z"); 
+    }
+    
+    match task.sync_mode {
+        SyncMode::Mirror => { 
+            cmd.arg("--delete"); 
+        }
+        SyncMode::SafeSync => { 
+            cmd.arg("--delete").arg("--backup").arg("--backup-dir=.rsync-backup"); 
+        }
+        SyncMode::Update => { 
+            cmd.arg("--update"); 
+        }
+        SyncMode::AddOnly => {}
+    }
+    
+    cmd.arg("--filter=:- .gitignore");
+    cmd.arg(format!("{}/", task.source));
+    cmd.arg(&full_remote);
+    
+    match cmd.output() {
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|s| s.to_string())
+                .collect()
+        }
+        Ok(o) => vec![format!("Error: {}", String::from_utf8_lossy(&o.stderr))],
+        Err(e) => vec![format!("Exec Error: {}", e)],
+    }
+}
+
 async fn run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
+    // SECURITY: Validate host before using in rsync command
+    if !is_valid_host(&task.remote_host) {
+        update_status(&task.id, "ERROR (Bad Host)", state);
+        update_log(&task.id, "❌ Invalid remote host format", state);
+        return;
+    }
+
     update_status(&task.id, "SYNCING 0%", state);
     update_log(&task.id, "🔄 Starting sync...", state);
 
@@ -204,10 +309,21 @@ async fn run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
     cmd.arg("--info=progress2");
     cmd.arg("--no-inc-recursive");
     
-    // SSH with ControlMaster for connection reuse
-    cmd.arg("-e").arg("ssh -o ControlMaster=auto -o ControlPath=~/.ssh/sockets/%r@%h-%p -o ControlPersist=600");
+    // --- PERFORMANCE OPTIMIZATION ---
+    // --partial: Keeps partial files if connection drops (Critical for large files)
+    cmd.arg("--partial");
+    // --inplace: Modifies files directly. Saves disk space, but slightly riskier if crash.
+    cmd.arg("--inplace");
     
-    // Compression
+    // SSH with ControlMaster for connection reuse
+    // --- SSH OPTIMIZATION ---
+    // -T: Disable pseudo-tty (faster)
+    // -c aes128-gcm@openssh.com: Fastest hardware cipher
+    // Compression=no: Don't double-compress large binary files
+    let ssh_cmd = "ssh -T -c aes128-gcm@openssh.com -o Compression=no -o ControlMaster=auto -o ControlPath=~/.ssh/sockets/%r@%h-%p -o ControlPersist=600";
+    cmd.arg("-e").arg(ssh_cmd);
+    
+    // Compression (only if user explicitly asked)
     if task.compress {
         cmd.arg("-z");
     }
@@ -448,22 +564,27 @@ async fn main() -> anyhow::Result<()> {
                                 ServerResponse::DirList(dirs)
                             }
                             ClientRequest::StartTask(task) => {
-                                let task_id = task.id.clone();
-                                let mut s = state_ref.lock().unwrap();
-                                if !s.tasks.contains_key(&task_id) {
-                                    let task_clone = task.clone();
-                                    let stopper = spawn_sync_worker(task_clone, state_ref.clone());
-                                    s.tasks.insert(task_id.clone(), task);
-                                    s.stoppers.insert(task_id, stopper);
-                                    
-                                    // Save tasks to disk
-                                    if let Err(e) = save_tasks(&s.tasks) {
-                                        eprintln!("Warning: Failed to save tasks: {}", e);
-                                    }
-                                    
-                                    ServerResponse::Ack
+                                // SECURITY: Validate host before starting task
+                                if !is_valid_host(&task.remote_host) {
+                                    ServerResponse::Error("Invalid remote host format".to_string())
                                 } else {
-                                    ServerResponse::Error(format!("Task {} already exists", task_id))
+                                    let task_id = task.id.clone();
+                                    let mut s = state_ref.lock().unwrap();
+                                    if !s.tasks.contains_key(&task_id) {
+                                        let task_clone = task.clone();
+                                        let stopper = spawn_sync_worker(task_clone, state_ref.clone());
+                                        s.tasks.insert(task_id.clone(), task);
+                                        s.stoppers.insert(task_id, stopper);
+                                        
+                                        // Save tasks to disk
+                                        if let Err(e) = save_tasks(&s.tasks) {
+                                            eprintln!("Warning: Failed to save tasks: {}", e);
+                                        }
+                                        
+                                        ServerResponse::Ack
+                                    } else {
+                                        ServerResponse::Error(format!("Task {} already exists", task_id))
+                                    }
                                 }
                             }
                             ClientRequest::StopTask(id) => {
@@ -485,6 +606,19 @@ async fn main() -> anyhow::Result<()> {
                                 }
                                 
                                 ServerResponse::Ack
+                            }
+                            ClientRequest::DryRun(task_id) => {
+                                let task = {
+                                    let s = state_ref.lock().unwrap();
+                                    s.tasks.get(&task_id).cloned()
+                                };
+                                
+                                if let Some(task) = task {
+                                    let changes = run_dry_run(&task);
+                                    ServerResponse::DryRunResult(changes)
+                                } else {
+                                    ServerResponse::Error(format!("Task {} not found", task_id))
+                                }
                             }
                         };
 
