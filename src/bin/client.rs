@@ -22,6 +22,7 @@ enum AppMode {
     Dashboard,
     LocalBrowser,     // Browse local directories (source selection)
     RemoteHostInput,  // Edit remote host before browsing remote
+    PasswordInput,    // Enter SSH password (optional)
     SyncModeSelect,   // Select sync mode (Mirror, AddOnly, SafeSync, Update)
     RemoteBrowser,    // Browse remote directories (destination selection)
     DryRunView,       // Display dry run results
@@ -41,6 +42,10 @@ struct App {
     // Remote Host Input State
     input_remote_host: String,     // User's edited remote host
     input_cursor_pos: usize,       // Cursor position in input field
+    // Password Input State
+    pending_password: Option<String>, // Stores the final confirmed password
+    input_password: String,           // Buffer for typing password
+    show_password: bool,              // Toggle to show/hide characters
     // Sync Mode Selection State
     pending_sync_mode: SyncMode,   // Selected sync mode
     pending_compress: bool,        // Compression enabled
@@ -192,6 +197,9 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
         pending_remote_host: String::new(), // Will be fetched from server
         input_remote_host: String::new(),
         input_cursor_pos: 0,
+        pending_password: None,
+        input_password: String::new(),
+        show_password: false,
         pending_sync_mode: SyncMode::Mirror, // Default: Mirror mode
         pending_compress: true,               // Default: Enable compression
         sync_mode_selected_idx: 0,           // Start at first option
@@ -337,6 +345,36 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
                 f.render_widget(instructions, browser_chunks[1]);
             }
 
+            // --- PASSWORD INPUT POPUP ---
+            if let AppMode::PasswordInput = app.mode {
+                let area = centered_rect(60, 25, size);
+                f.render_widget(Clear, area);
+                
+                let pass_chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(5), Constraint::Length(3)])
+                    .split(area);
+
+                let display_text = if app.show_password {
+                    format!("{}|", app.input_password)
+                } else {
+                    format!("{}|", "*".repeat(app.input_password.len()))
+                };
+
+                let input = Paragraph::new(format!(
+                    "SSH Password (leave empty for SSH keys):\n\n{}",
+                    display_text
+                ))
+                    .block(Block::default()
+                        .title("Step 3: Enter SSH Password")
+                        .borders(Borders::ALL));
+                f.render_widget(input, pass_chunks[0]);
+
+                let help = Paragraph::new("[Enter] Confirm  [Tab] Show/Hide  [Esc] Back")
+                    .block(Block::default().borders(Borders::ALL));
+                f.render_widget(help, pass_chunks[1]);
+            }
+
             // --- REMOTE HOST INPUT POPUP ---
             if let AppMode::RemoteHostInput = app.mode {
                 let area = centered_rect(70, 25, size);
@@ -421,7 +459,7 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
                 
                 let mode_list = List::new(mode_items)
                     .block(Block::default()
-                        .title("Step 3: Select Sync Mode")
+                        .title("Step 4: Select Sync Mode")
                         .borders(Borders::ALL));
                 f.render_widget(mode_list, sync_chunks[0]);
                 
@@ -571,9 +609,10 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
                             // Update pending_remote_host with the edited value
                             app.pending_remote_host = app.input_remote_host.trim().to_string();
                             
-                            // Switch to Sync Mode Select
-                            app.mode = AppMode::SyncModeSelect;
-                            app.sync_mode_selected_idx = 0; // Reset to first mode
+                            // Switch to Password Input
+                            app.mode = AppMode::PasswordInput;
+                            app.input_password.clear();
+                            app.show_password = false;
                         }
                         KeyCode::Left => {
                             if app.input_cursor_pos > 0 {
@@ -609,9 +648,35 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
                         }
                         _ => {}
                     },
-                    AppMode::SyncModeSelect => match key.code {
+                    AppMode::PasswordInput => match key.code {
                         KeyCode::Esc => {
                             app.mode = AppMode::RemoteHostInput;  // Go back
+                        }
+                        KeyCode::Enter => {
+                            // STEP 3 COMPLETE: Password Confirmed
+                            if app.input_password.trim().is_empty() {
+                                app.pending_password = None; // Empty means "Use SSH Keys"
+                            } else {
+                                app.pending_password = Some(app.input_password.clone());
+                            }
+                            // Proceed to Sync Mode Select
+                            app.mode = AppMode::SyncModeSelect;
+                            app.sync_mode_selected_idx = 0; // Reset to first mode
+                        }
+                        KeyCode::Tab => {
+                            app.show_password = !app.show_password;
+                        }
+                        KeyCode::Backspace => {
+                            app.input_password.pop();
+                        }
+                        KeyCode::Char(c) => {
+                            app.input_password.push(c);
+                        }
+                        _ => {}
+                    },
+                    AppMode::SyncModeSelect => match key.code {
+                        KeyCode::Esc => {
+                            app.mode = AppMode::PasswordInput;  // Go back to password input
                         }
                         KeyCode::Down => {
                             if app.sync_mode_selected_idx < 3 {  // 0-3 for 4 modes
@@ -628,7 +693,7 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
                             app.pending_compress = !app.pending_compress;
                         }
                         KeyCode::Enter => {
-                            // STEP 3 COMPLETE: Sync Mode Selected
+                            // STEP 4 COMPLETE: Sync Mode Selected
                             // Save the selected mode
                             app.pending_sync_mode = match app.sync_mode_selected_idx {
                                 0 => SyncMode::Mirror,
@@ -645,7 +710,8 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
                             // Fetch Remote Dirs using the host from user input
                             match send_req(ClientRequest::ListRemoteDirs(
                                 app.pending_remote_host.clone(),
-                                app.remote_current_path.clone()
+                                app.remote_current_path.clone(),
+                                app.pending_password.clone()
                             )) {
                                 ServerResponse::DirList(d) => {
                                     app.dir_entries = d;
@@ -693,7 +759,8 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
                             // Fetch New Remote List using the host from user input
                             match send_req(ClientRequest::ListRemoteDirs(
                                 app.pending_remote_host.clone(),
-                                app.remote_current_path.clone()
+                                app.remote_current_path.clone(),
+                                app.pending_password.clone()
                             )) {
                                 ServerResponse::DirList(d) => {
                                     app.dir_entries = d;
@@ -707,7 +774,7 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
                             }
                         }
                         KeyCode::Char(' ') => {
-                            // STEP 4 COMPLETE: Remote Dest Selected
+                            // STEP 5 COMPLETE: Remote Dest Selected
                             let task_id = format!("task_{}", app.tasks.len() + 1);
                             
                             let new_task = SyncTask {
@@ -720,6 +787,7 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
                                 poll_interval: 5,
                                 sync_mode: app.pending_sync_mode.clone(),
                                 compress: app.pending_compress,
+                                password: app.pending_password.clone(),
                             };
                             
                             match send_req(ClientRequest::StartTask(new_task)) {

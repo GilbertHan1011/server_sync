@@ -112,7 +112,7 @@ struct ServerState {
 }
 
 // --- REMOTE DIRECTORY LISTING ---
-async fn list_remote_dirs_ssh(remote_host: &str, path: &str) -> Vec<String> {
+async fn list_remote_dirs_ssh(remote_host: &str, path: &str, password: &Option<String>) -> Vec<String> {
     // SECURITY: Validate host before using in SSH command
     if !is_valid_host(remote_host) {
         return vec!["Error: Invalid remote host format".to_string()];
@@ -120,13 +120,28 @@ async fn list_remote_dirs_ssh(remote_host: &str, path: &str) -> Vec<String> {
 
     // Default to current directory if empty
     let target_path = if path.is_empty() { "." } else { path };
+    let mut cmd = Command::new("ssh");
+
+    // --- ASKPASS LOGIC ---
+    if let Some(pass) = password {
+        // 1. Create the helper script
+        if let Ok(script_path) = setup_askpass_script() {
+            // 2. Set Env Vars for SSH to pick up
+            cmd.env("SSH_ASKPASS", &script_path);
+            cmd.env("SSH_ASKPASS_REQUIRE", "force"); // Force askpass even if no TTY
+            cmd.env("SERVER_SYNC_PW", pass);         // The password itself
+            cmd.env("DISPLAY", ":0");                // Dummy display to trick old SSH versions
+        }
+    }
+    // ---------------------
 
     // Run: ssh user@host "ls -1F --group-directories-first /path"
     // OPTIMIZED SSH: Uses ControlMaster and AES-GCM cipher for speed
-    let output = Command::new("ssh")
+    let output = cmd
         .arg("-T")  // Disable pseudo-tty (faster)
         .arg("-c").arg("aes128-gcm@openssh.com")  // Fastest hardware cipher
         .arg("-o").arg("Compression=no")  // Don't compress directory listings
+        .arg("-o").arg("StrictHostKeyChecking=no") // Auto-accept host keys
         .arg("-o").arg("ControlMaster=auto")
         .arg("-o").arg("ControlPath=~/.ssh/sockets/%r@%h-%p")
         .arg("-o").arg("ControlPersist=600")
@@ -261,11 +276,22 @@ async fn run_dry_run(task: &SyncTask) -> Vec<String> {
     let full_remote = format!("{}:{}", task.remote_host, task.remote_path);
     let mut cmd = Command::new("rsync");
     
+    // --- ASKPASS LOGIC ---
+    if let Some(pass) = &task.password {
+        if let Ok(script_path) = setup_askpass_script() {
+            cmd.env("SSH_ASKPASS", &script_path);
+            cmd.env("SSH_ASKPASS_REQUIRE", "force");
+            cmd.env("SERVER_SYNC_PW", pass);
+            cmd.env("DISPLAY", ":0");
+        }
+    }
+    // ---------------------
+    
     cmd.arg("-avn"); // -n = dry run, -a = archive, -v = verbose
     cmd.arg("--itemize-changes"); // Show detailed changes
     
-    // Use same SSH optimization
-    let ssh_cmd = "ssh -T -c aes128-gcm@openssh.com -o Compression=no -o ControlMaster=auto -o ControlPath=~/.ssh/sockets/%r@%h-%p -o ControlPersist=600";
+    // Use same SSH optimization with StrictHostKeyChecking=no
+    let ssh_cmd = "ssh -T -c aes128-gcm@openssh.com -o Compression=no -o StrictHostKeyChecking=no -o ControlMaster=auto -o ControlPath=~/.ssh/sockets/%r@%h-%p -o ControlPersist=600";
     cmd.arg("-e").arg(ssh_cmd);
     
     if task.compress { 
@@ -315,7 +341,17 @@ async fn run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
     let full_remote = format!("{}:{}", task.remote_host, task.remote_path);
     
     let mut cmd = Command::new("rsync"); // Now tokio::process::Command
-    
+    if let Some(pass) = &task.password {
+        // 1. We assume the script is created. Since run_rsync is called often,
+        // you might want to create it once in main(), or just overwrite it here.
+        // Overwriting is safer to ensure it exists.
+        if let Ok(script_path) = setup_askpass_script() { 
+            cmd.env("SSH_ASKPASS", &script_path);
+            cmd.env("SSH_ASKPASS_REQUIRE", "force");
+            cmd.env("SERVER_SYNC_PW", pass);
+            cmd.env("DISPLAY", ":0");
+        }
+    }
     cmd.kill_on_drop(true); // Safety: kill rsync if task is cancelled
     
     // Base flags: archive + verbose
@@ -336,7 +372,8 @@ async fn run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
     // -T: Disable pseudo-tty (faster)
     // -c aes128-gcm@openssh.com: Fastest hardware cipher
     // Compression=no: Don't double-compress large binary files
-    let ssh_cmd = "ssh -T -c aes128-gcm@openssh.com -o Compression=no -o ControlMaster=auto -o ControlPath=~/.ssh/sockets/%r@%h-%p -o ControlPersist=600";
+    // StrictHostKeyChecking=no: Auto-accept host keys (prevents hanging on yes/no prompt)
+    let ssh_cmd = "ssh -T -c aes128-gcm@openssh.com -o Compression=no -o StrictHostKeyChecking=no -o ControlMaster=auto -o ControlPath=~/.ssh/sockets/%r@%h-%p -o ControlPersist=600";
     cmd.arg("-e").arg(ssh_cmd);
     
     // Compression (only if user explicitly asked)
@@ -587,9 +624,9 @@ async fn run_server(args: ServerArgs) -> anyhow::Result<()> {
                                     Err(e) => ServerResponse::Error(e.to_string()),
                                 }
                             }
-                            ClientRequest::ListRemoteDirs(host, path) => {
-                                // Use the host from the client request (user's TUI input)
-                                let dirs = list_remote_dirs_ssh(&host, &path).await;
+                            ClientRequest::ListRemoteDirs(host, path, password) => {
+                                // Use the host and password from the client request
+                                let dirs = list_remote_dirs_ssh(&host, &path, &password).await;
                                 ServerResponse::DirList(dirs)
                             }
                             ClientRequest::StartTask(task) => {
@@ -680,4 +717,26 @@ async fn run_server(args: ServerArgs) -> anyhow::Result<()> {
     // Unreachable - loop runs forever, but required for return type
     #[allow(unreachable_code)]
     Ok(())
+}
+
+fn setup_askpass_script() -> std::io::Result<String> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    // Ensure directory exists
+    let dir = format!("{}/.ssh/sockets", home);
+    fs::create_dir_all(&dir)?;
+    
+    let script_path = format!("{}/askpass_wrapper.sh", dir);
+    
+    // Simple script: output the env var content
+    let content = "#!/bin/sh\necho \"$SERVER_SYNC_PW\"";
+    
+    // Write synchronously (fast enough for small file)
+    fs::write(&script_path, content)?;
+    
+    // Set executable permission (chmod 700)
+    let mut perms = fs::metadata(&script_path)?.permissions();
+    perms.set_mode(0o700);
+    fs::set_permissions(&script_path, perms)?;
+    
+    Ok(script_path)
 }
