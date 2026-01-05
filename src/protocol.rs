@@ -32,6 +32,7 @@ pub enum ClientRequest {
     GetRemoteHost,                   // "What is the default remote host?"
     ListLocalDirs(String),           // "What folders are in /home/user?"
     ListRemoteDirs(String, String, Option<String>),  // "What folders are on remote server at path X?" (host, path, password)
+    GetRemoteHome(String,Option<String>), // "What is the home directory on remote server?" (host, password)
     StartTask(SyncTask),             // "Start syncing this new pair"
     StopTask(String),                // "Stop task with ID 'X'"
     DryRun(String),                  // "Show what would change for task X (dry run)"
@@ -42,6 +43,7 @@ pub enum ClientRequest {
 pub enum ServerResponse {
     State(Vec<SyncTask>),            // List of all active tasks
     RemoteHost(String),              // The default remote host
+    RemoteHome(String),              // The home directory on remote server
     DirList(Vec<String>),            // List of subdirectories
     Ack,                             // "Okay, done"
     Error(String),

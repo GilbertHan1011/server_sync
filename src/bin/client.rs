@@ -705,7 +705,17 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
                             
                             // Switch to Remote Browser
                             app.mode = AppMode::RemoteBrowser;
-                            app.remote_current_path = String::new(); // Start at remote HOME
+                            match send_req(ClientRequest::GetRemoteHome(
+                                app.pending_remote_host.clone(),
+                                app.pending_password.clone()
+                            )) {
+                                ServerResponse::RemoteHome(path) => {
+                                    app.remote_current_path = path;
+                                }
+                                _ => {
+                                    app.remote_current_path = "/".to_string(); // Fallback
+                                }
+                            }
                             
                             // Fetch Remote Dirs using the host from user input
                             match send_req(ClientRequest::ListRemoteDirs(
@@ -743,12 +753,23 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
                             // Navigate Remote Dir
                             let selected = &app.dir_entries[app.selected_idx];
                             let new_path = if selected == ".." {
-                                // Simple parent logic (string manipulation)
                                 let p = std::path::Path::new(&app.remote_current_path);
-                                p.parent().unwrap_or(std::path::Path::new("")).to_str().unwrap().to_string()
+                                match p.parent() {
+                                    Some(parent) => {
+                                        let s = parent.to_string_lossy().to_string();
+                                        if s.is_empty() {
+                                            "/".to_string()
+                                        } else {
+                                            s
+                                        }
+                                    },
+                                    None => {
+                                        app.remote_current_path.clone()
+                                    }
+                                }
                             } else {
-                                if app.remote_current_path.is_empty() {
-                                    selected.clone()
+                                if app.remote_current_path == "/" {
+                                    format!("/{}", selected)
                                 } else {
                                     format!("{}/{}", app.remote_current_path, selected)
                                 }

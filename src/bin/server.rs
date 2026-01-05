@@ -163,6 +163,42 @@ async fn list_remote_dirs_ssh(remote_host: &str, path: &str, password: &Option<S
     }
 }
 
+async fn get_remote_home_ssh(remote_host: &str, password: &Option<String>) -> String {
+    if !is_valid_host(remote_host) {
+        return "/".to_string();
+    }
+
+    let mut cmd = Command::new("ssh");
+    if let Some(pass) = password {
+        if let Ok(script_path) = setup_askpass_script() {
+            cmd.env("SSH_ASKPASS", &script_path);
+            cmd.env("SSH_ASKPASS_REQUIRE", "force");
+            cmd.env("SERVER_SYNC_PW", pass);
+            cmd.env("DISPLAY", ":0");
+        }
+    }
+
+    let output = cmd
+        .arg("-T")
+        .arg("-c").arg("aes128-gcm@openssh.com")
+        .arg("-o").arg("StrictHostKeyChecking=no")
+        .arg("-o").arg("ControlMaster=auto")
+        .arg("-o").arg("ControlPath=~/.ssh/sockets/%r@%h-%p")
+        .arg("-o").arg("ControlPersist=600")
+        .arg(remote_host)
+        .arg("pwd") // <--- The command to run
+        .output()
+        .await;
+
+    match output {
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        }
+        _ => "/".to_string(),
+    }
+}
+    // ---------------------
+
 // --- SYNC WORKER ---
 // Spawns a dedicated thread for a single folder
 fn spawn_sync_worker(
@@ -628,6 +664,10 @@ async fn run_server(args: ServerArgs) -> anyhow::Result<()> {
                                 // Use the host and password from the client request
                                 let dirs = list_remote_dirs_ssh(&host, &path, &password).await;
                                 ServerResponse::DirList(dirs)
+                            }
+                            ClientRequest::GetRemoteHome(host, password) => {
+                                let path = get_remote_home_ssh(&host, &password).await;
+                                ServerResponse::RemoteHome(path)
                             }
                             ClientRequest::StartTask(task) => {
                                 // SECURITY: Validate host before starting task
