@@ -61,15 +61,6 @@ struct App {
     is_editing_host: bool,
 }
 
-fn get_socket_path() -> String {
-    let home = std::env::var("HOME").expect("HOME environment variable not set");
-    format!("{}/.sync_daemon.sock", home)
-}
-
-fn get_host_path() -> String {
-    let home = std::env::var("HOME").expect("HOME environment variable not set");
-    format!("{}/.sync_hosts", home)
-}
 
 fn load_hosts() -> Vec<String> {
     let path = get_host_path();
