@@ -22,6 +22,7 @@ enum AppMode {
     Dashboard,
     LocalBrowser,     // Browse local directories (source selection)
     RemoteHostInput,  // Edit remote host before browsing remote
+    HostSelect,
     PasswordInput,    // Enter SSH password (optional)
     SyncModeSelect,   // Select sync mode (Mirror, AddOnly, SafeSync, Update)
     RemoteBrowser,    // Browse remote directories (destination selection)
@@ -54,11 +55,38 @@ struct App {
     dry_run_results: Vec<String>,  // Results from dry run
     dry_run_task_id: String,       // Which task was dry-run
     dry_run_scroll: usize,         // Scroll position in dry run view
+    // Saved Host Names
+    saved_hosts: Vec<String>,
+    host_list_idx: usize,
+    is_editing_host: bool,
 }
 
 fn get_socket_path() -> String {
     let home = std::env::var("HOME").expect("HOME environment variable not set");
     format!("{}/.sync_daemon.sock", home)
+}
+
+fn get_host_path() -> String {
+    let home = std::env::var("HOME").expect("HOME environment variable not set");
+    format!("{}/.sync_hosts", home)
+}
+
+fn load_hosts() -> Vec<String> {
+    let path = get_host_path();
+    if let Ok(content) = std::fs::read_to_string(path) {
+        content.lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty() && !l.starts_with("#"))
+            .collect()
+    } else{
+        vec![]
+    }
+}
+
+fn save_hosts(hosts: &Vec<String>) {
+    let path = get_host_path();
+    let content = hosts.join("\n");
+    let _ = std::fs::write(path, content);
 }
 
 fn send_req(req: ClientRequest) -> ServerResponse {
@@ -206,6 +234,9 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
         dry_run_results: vec![],
         dry_run_task_id: String::new(),
         dry_run_scroll: 0,
+        saved_hosts: load_hosts(),
+        host_list_idx: 0,
+        is_editing_host: false,
     };
 
     // Fetch remote host from server on startup
@@ -373,6 +404,39 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
                 let help = Paragraph::new("[Enter] Confirm  [Tab] Show/Hide  [Esc] Back")
                     .block(Block::default().borders(Borders::ALL));
                 f.render_widget(help, pass_chunks[1]);
+            }
+
+            if let AppMode::HostSelect = app.mode {
+                let area = centered_rect(60, 60, size);
+                f.render_widget(Clear, area);
+                
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Min(3), Constraint::Length(3)])
+                    .split(area);
+            
+                let items: Vec<ListItem> = app.saved_hosts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, h)| {
+                        let style = if i == app.host_list_idx {
+                            Style::default().bg(Color::Blue).fg(Color::White)
+                        } else {
+                            Style::default()
+                        };
+                        ListItem::new(h.as_str()).style(style)
+                    })
+                    .collect();
+            
+                let list = List::new(items)
+                    .block(Block::default()
+                        .title("Step 2: Select Remote Host")
+                        .borders(Borders::ALL));
+                f.render_widget(list, chunks[0]);
+            
+                let instructions = Paragraph::new("[Enter] Select  [A] Add  [E] Edit  [D] Delete")
+                    .block(Block::default().borders(Borders::ALL));
+                f.render_widget(instructions, chunks[1]);
             }
 
             // --- REMOTE HOST INPUT POPUP ---
@@ -592,27 +656,99 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
                         KeyCode::Char(' ') => {
                             // STEP 1 COMPLETE: Source Selected
                             app.pending_source = app.current_path.clone();
-                            
-                            // Switch to Remote Host Input
+
+                            app.saved_hosts = load_hosts();
+
+                            if app.saved_hosts.is_empty() {
+                                app.mode = AppMode::RemoteHostInput;
+                                app.input_remote_host = String::new();
+                                app.is_editing_host = false;
+                            } else {
+                                app.mode = AppMode::HostSelect;
+                                app.host_list_idx = 0;
+                            }
+                        }
+                        _ => {}
+                    },
+                    AppMode::HostSelect => match key.code {
+                        KeyCode::Esc => app.mode = AppMode::LocalBrowser, // Back
+                        KeyCode::Down => {
+                            if app.host_list_idx < app.saved_hosts.len().saturating_sub(1) {
+                                app.host_list_idx += 1;
+                            }
+                        }
+                        KeyCode::Up => {
+                            if app.host_list_idx > 0 {
+                                app.host_list_idx -= 1;
+                            }
+                        }
+                        // SELECT HOST
+                        KeyCode::Enter => {
+                            if !app.saved_hosts.is_empty() {
+                                app.pending_remote_host = app.saved_hosts[app.host_list_idx].clone();
+                                // Proceed to Password
+                                app.mode = AppMode::PasswordInput;
+                                app.input_password.clear();
+                                app.show_password = false;
+                            }
+                        }
+                        // ADD NEW HOST
+                        KeyCode::Char('a') | KeyCode::Char('A') => {
                             app.mode = AppMode::RemoteHostInput;
-                            app.input_remote_host = app.pending_remote_host.clone(); // Pre-fill with default
-                            app.input_cursor_pos = app.input_remote_host.len();
+                            app.input_remote_host = String::new();
+                            app.input_cursor_pos = 0;
+                            app.is_editing_host = false; // Adding new
+                        }
+                        // EDIT SELECTED HOST
+                        KeyCode::Char('e') | KeyCode::Char('E') => {
+                            if !app.saved_hosts.is_empty() {
+                                app.mode = AppMode::RemoteHostInput;
+                                app.input_remote_host = app.saved_hosts[app.host_list_idx].clone();
+                                app.input_cursor_pos = app.input_remote_host.len();
+                                app.is_editing_host = true; // Editing existing
+                            }
+                        }
+                        // DELETE HOST
+                        KeyCode::Char('d') | KeyCode::Char('D') => {
+                            if !app.saved_hosts.is_empty() {
+                                app.saved_hosts.remove(app.host_list_idx);
+                                save_hosts(&app.saved_hosts); // Save to file immediately
+                                if app.host_list_idx >= app.saved_hosts.len() && !app.saved_hosts.is_empty() {
+                                    app.host_list_idx = app.saved_hosts.len() - 1;
+                                }
+                            }
                         }
                         _ => {}
                     },
                     AppMode::RemoteHostInput => match key.code {
                         KeyCode::Esc => {
-                            app.mode = AppMode::LocalBrowser;  // Go back to local browser
+                            if !app.saved_hosts.is_empty() {
+                                app.mode = AppMode::HostSelect;
+                            } else {
+                                app.mode = AppMode::LocalBrowser;  // Go back to local browser
+                            }
                         }
                         KeyCode::Enter => {
-                            // STEP 2 COMPLETE: Remote Host Confirmed
-                            // Update pending_remote_host with the edited value
-                            app.pending_remote_host = app.input_remote_host.trim().to_string();
-                            
-                            // Switch to Password Input
-                            app.mode = AppMode::PasswordInput;
-                            app.input_password.clear();
-                            app.show_password = false;
+                            let input = app.input_remote_host.trim().to_string();
+                            if !input.is_empty() {
+                                if app.is_editing_host {
+                                    // UPDATE existing
+                                    if app.host_list_idx < app.saved_hosts.len() {
+                                        app.saved_hosts[app.host_list_idx] = input.clone();
+                                    }
+                                } else {
+                                    // ADD new
+                                    app.saved_hosts.push(input.clone());
+                                    app.host_list_idx = app.saved_hosts.len() - 1; // Select the new one
+                                }
+                                // Save to disk
+                                save_hosts(&app.saved_hosts);
+                                // Set as pending and go to Password
+                                app.pending_remote_host = input;
+                                app.mode = AppMode::PasswordInput;
+                                app.input_password.clear();
+                                app.show_password = false;
+                            }
                         }
                         KeyCode::Left => {
                             if app.input_cursor_pos > 0 {
