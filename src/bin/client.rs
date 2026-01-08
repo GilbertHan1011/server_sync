@@ -84,7 +84,9 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
         pending_source: String::new(),
         remote_current_path: String::new(),
         pending_remote_host: String::new(),
+        pending_remote_port: Some(22),
         input_remote_host: String::new(),
+        input_remote_port: String::from("22"),
         input_cursor_pos: 0,
         pending_password: None,
         input_password: String::new(),
@@ -100,20 +102,6 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
         is_editing_host: false,
     };
 
-    // Fetch remote host from server on startup
-    match send_req(ClientRequest::GetRemoteHost) {
-        ServerResponse::RemoteHost(host) => {
-            app.pending_remote_host = host;
-        }
-        ServerResponse::Error(e) => {
-            eprintln!("Warning: Could not fetch remote host from server: {}", e);
-            app.pending_remote_host = "user@remote".to_string();
-        }
-        _ => {
-            eprintln!("Warning: Unexpected response when fetching remote host");
-            app.pending_remote_host = "user@remote".to_string();
-        }
-    }
 
     loop {
         // Check for Ctrl+C signal

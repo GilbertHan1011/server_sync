@@ -15,6 +15,7 @@ pub struct SyncTask {
     pub id: String,          // Unique ID (e.g., "task_1")
     pub source: String,      // Local Path
     pub remote_host: String, // Remote host (e.g., "user@host")
+    pub remote_port: Option<u16>, // Remote port (e.g., 22)
     pub remote_path: String, // Remote path (e.g., "/path/to/destination")
     pub status: String,      // IDLE, SYNCING, ERROR, PENDING...
     pub last_log: String,
@@ -29,10 +30,9 @@ pub struct SyncTask {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ClientRequest {
     GetState,                        // "Tell me everything"
-    GetRemoteHost,                   // "What is the default remote host?"
     ListLocalDirs(String),           // "What folders are in /home/user?"
-    ListRemoteDirs(String, String, Option<String>),  // "What folders are on remote server at path X?" (host, path, password)
-    GetRemoteHome(String,Option<String>), // "What is the home directory on remote server?" (host, password)
+    ListRemoteDirs(String, Option<u16>, String, Option<String>),  // "What folders are on remote server at path X?" (host, path, port, password)
+    GetRemoteHome(String, Option<u16>, Option<String>), // "What is the home directory on remote server?" (host, port, password)
     StartTask(SyncTask),             // "Start syncing this new pair"
     StopTask(String),                // "Stop task with ID 'X'"
     DryRun(String),                  // "Show what would change for task X (dry run)"
@@ -42,7 +42,6 @@ pub enum ClientRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ServerResponse {
     State(Vec<SyncTask>),            // List of all active tasks
-    RemoteHost(String),              // The default remote host
     RemoteHome(String),              // The home directory on remote server
     DirList(Vec<String>),            // List of subdirectories
     Ack,                             // "Okay, done"

@@ -187,6 +187,7 @@ pub async fn run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
     update_log(&task.id, "🔄 Starting sync...", state);
 
     let full_remote = format!("{}:{}", task.remote_host, task.remote_path);
+    let port = task.remote_port.unwrap_or(22);
     
     let mut cmd = Command::new("rsync"); // Now tokio::process::Command
     if let Some(pass) = &task.password {
@@ -221,7 +222,10 @@ pub async fn run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
     // -c aes128-gcm@openssh.com: Fastest hardware cipher
     // Compression=no: Don't double-compress large binary files
     // StrictHostKeyChecking=no: Auto-accept host keys (prevents hanging on yes/no prompt)
-    let ssh_cmd = "ssh -T -c aes128-gcm@openssh.com -o Compression=no -o StrictHostKeyChecking=no -o ControlMaster=auto -o ControlPath=~/.ssh/sockets/%r@%h-%p -o ControlPersist=600";
+    let ssh_cmd = format!(
+        "ssh -p {} -T -c aes128-gcm@openssh.com -o Compression=no -o StrictHostKeyChecking=no -o ControlMaster=auto -o ControlPath=~/.ssh/sockets/%r@%h-%p -o ControlPersist=600", 
+        port
+    );
     cmd.arg("-e").arg(ssh_cmd);
     
     // Compression (only if user explicitly asked)

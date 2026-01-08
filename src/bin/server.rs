@@ -5,13 +5,30 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use daemonize::Daemonize;
 use clap::Parser;
 use server_sync::protocol::ClientRequest;
-use server_sync::server::config::{ServerArgs, load_server_config};
 use server_sync::server::state::{ServerState, load_tasks};
 use server_sync::server::worker::spawn_sync_worker;
 use server_sync::server::handler::handle_request;
 use server_sync::common::utils::get_socket_path;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
+
+// --- CLI ARGUMENTS ---
+#[derive(Parser)]
+#[command(name = "server_sync")]
+#[command(about = "File synchronization daemon server", long_about = None)]
+struct ServerArgs {
+    /// Remote host (e.g., "user@hostname")
+    #[arg(short, long, default_value = "user@remote")]
+    remote_host: String,
+    
+    /// Path to log file (stdout if not provided)
+    #[arg(short, long)]
+    log: Option<String>,
+    
+    /// Run in foreground instead of daemonizing
+    #[arg(short, long)]
+    foreground: bool,
+}
 
 // --- MAIN ---
 // Synchronous main - daemonize BEFORE tokio runtime
@@ -66,9 +83,7 @@ fn main() -> anyhow::Result<()> {
 async fn run_server(args: ServerArgs) -> anyhow::Result<()> {
     let socket_path = get_socket_path();
 
-    // Load configuration
-    let config = load_server_config(&args.config);
-    println!("Loaded config: remote_host = {}", config.remote_host);
+    println!("Using remote_host: {}", args.remote_host);
 
     // Clean up old socket file if it exists
     if std::path::Path::new(&socket_path).exists() {
@@ -85,7 +100,7 @@ async fn run_server(args: ServerArgs) -> anyhow::Result<()> {
     let state = Arc::new(Mutex::new(ServerState {
         tasks: HashMap::new(),
         stoppers: HashMap::new(),
-        remote_host: config.remote_host,
+        remote_host: args.remote_host,
     }));
 
     // Ensure SSH control sockets directory exists

@@ -45,6 +45,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         AppMode::RemoteBrowser => draw_remote_browser(f, app, size),
         AppMode::PasswordInput => draw_password_input(f, app, size),
         AppMode::RemoteHostInput => draw_remote_host_input(f, app, size),
+        AppMode::RemotePortInput => draw_remote_port_input(f, app, size),
         AppMode::SyncModeSelect => draw_sync_mode_select(f, app, size),
         AppMode::DryRunView => draw_dry_run_view(f, app, size),
         AppMode::HostSelect => draw_host_select(f, app, size),
@@ -262,6 +263,42 @@ fn draw_remote_host_input(f: &mut Frame, app: &App, size: Rect) {
     f.render_widget(input_block, input_chunks[0]);
     
     let instructions = Paragraph::new("[Enter] Continue  [Esc] Back  [←→] Move  [Home/End] Jump")
+        .block(Block::default().borders(Borders::ALL));
+    f.render_widget(instructions, input_chunks[1]);
+}
+
+fn draw_remote_port_input(f: &mut Frame, app: &App, size: Rect) {
+    let area = centered_rect(60, 25, size);
+    f.render_widget(Clear, area);
+    
+    let input_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(5), Constraint::Length(3)])
+        .split(area);
+    
+    // Show the input field with cursor
+    let display_text = if app.input_cursor_pos <= app.input_remote_port.len() {
+        if app.input_cursor_pos < app.input_remote_port.len() {
+            format!("{}|{}", 
+                &app.input_remote_port[..app.input_cursor_pos],
+                &app.input_remote_port[app.input_cursor_pos..])
+        } else {
+            format!("{}|", app.input_remote_port)
+        }
+    } else {
+        format!("{}|", app.input_remote_port)
+    };
+    
+    let input_block = Paragraph::new(format!(
+        "SSH Port (default: 22):\n\n{}",
+        display_text
+    ))
+    .block(Block::default()
+        .title("Step 2b: Enter SSH Port")
+        .borders(Borders::ALL));
+    f.render_widget(input_block, input_chunks[0]);
+    
+    let instructions = Paragraph::new("[Enter] Continue  [Esc] Back  [←→] Move  [Home/End] Jump  [0-9] Enter digits")
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(instructions, input_chunks[1]);
 }

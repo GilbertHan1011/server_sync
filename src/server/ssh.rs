@@ -4,7 +4,7 @@ use tokio::process::Command;
 use crate::common::utils::is_valid_host;
 
 // --- REMOTE DIRECTORY LISTING ---
-pub async fn list_remote_dirs_ssh(remote_host: &str, path: &str, password: &Option<String>) -> Vec<String> {
+pub async fn list_remote_dirs_ssh(remote_host: &str, port: Option<u16>, path: &str, password: &Option<String>) -> Vec<String> {
     // SECURITY: Validate host before using in SSH command
     if !is_valid_host(remote_host) {
         return vec!["Error: Invalid remote host format".to_string()];
@@ -12,6 +12,7 @@ pub async fn list_remote_dirs_ssh(remote_host: &str, path: &str, password: &Opti
 
     // Default to current directory if empty
     let target_path = if path.is_empty() { "." } else { path };
+    let p = port.unwrap_or(22).to_string();
     let mut cmd = Command::new("ssh");
 
     // --- ASKPASS LOGIC ---
@@ -30,6 +31,7 @@ pub async fn list_remote_dirs_ssh(remote_host: &str, path: &str, password: &Opti
     // Run: ssh user@host "ls -1F --group-directories-first /path"
     // OPTIMIZED SSH: Uses ControlMaster and AES-GCM cipher for speed
     let output = cmd
+        .arg("-p").arg(&p)
         .arg("-T")  // Disable pseudo-tty (faster)
         .arg("-c").arg("aes128-gcm@openssh.com")  // Fastest hardware cipher
         .arg("-o").arg("Compression=no")  // Don't compress directory listings
@@ -55,11 +57,12 @@ pub async fn list_remote_dirs_ssh(remote_host: &str, path: &str, password: &Opti
     }
 }
 
-pub async fn get_remote_home_ssh(remote_host: &str, password: &Option<String>) -> String {
+pub async fn get_remote_home_ssh(remote_host: &str, port: Option<u16>, password: &Option<String>) -> String {
     if !is_valid_host(remote_host) {
         return "/".to_string();
     }
 
+    let p = port.unwrap_or(22).to_string();
     let mut cmd = Command::new("ssh");
     if let Some(pass) = password {
         if let Ok(script_path) = setup_askpass_script() {
@@ -71,6 +74,7 @@ pub async fn get_remote_home_ssh(remote_host: &str, password: &Option<String>) -
     }
 
     let output = cmd
+        .arg("-p").arg(&p)
         .arg("-T")
         .arg("-c").arg("aes128-gcm@openssh.com")
         .arg("-o").arg("StrictHostKeyChecking=no")

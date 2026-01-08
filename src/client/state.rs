@@ -6,6 +6,7 @@ pub enum AppMode {
     Dashboard,
     LocalBrowser,     // Browse local directories (source selection)
     RemoteHostInput,  // Edit remote host before browsing remote
+    RemotePortInput,  // Edit remote port before browsing remote
     HostSelect,
     PasswordInput,    // Enter SSH password (optional)
     SyncModeSelect,   // Select sync mode (Mirror, AddOnly, SafeSync, Update)
@@ -24,8 +25,10 @@ pub struct App {
     pub pending_source: String,        // Selected local path before remote browsing
     pub remote_current_path: String,   // Current path in remote browser
     pub pending_remote_host: String,   // Remote host (e.g., "user@host")
+    pub pending_remote_port: Option<u16>, // Remote port (e.g., 22)
     // Remote Host Input State
     pub input_remote_host: String,     // User's edited remote host
+    pub input_remote_port: String, // User's edited remote port
     pub input_cursor_pos: usize,       // Cursor position in input field
     // Password Input State
     pub pending_password: Option<String>, // Stores the final confirmed password

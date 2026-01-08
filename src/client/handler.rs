@@ -17,6 +17,7 @@ pub fn handle_key_event(key: KeyEvent, app: &mut App) -> HandlerResult {
         AppMode::LocalBrowser => handle_local_browser_keys(key, app),
         AppMode::HostSelect => handle_host_select_keys(key, app),
         AppMode::RemoteHostInput => handle_remote_host_input_keys(key, app),
+        AppMode::RemotePortInput => handle_remote_port_input_keys(key, app),
         AppMode::PasswordInput => handle_password_input_keys(key, app),
         AppMode::SyncModeSelect => handle_sync_mode_select_keys(key, app),
         AppMode::RemoteBrowser => handle_remote_browser_keys(key, app),
@@ -205,22 +206,10 @@ fn handle_remote_host_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult 
             HandlerResult::Continue
         }
         KeyCode::Enter => {
-            let input = app.input_remote_host.trim().to_string();
-            if !input.is_empty() {
-                if app.is_editing_host {
-                    if app.host_list_idx < app.saved_hosts.len() {
-                        app.saved_hosts[app.host_list_idx] = input.clone();
-                    }
-                } else {
-                    app.saved_hosts.push(input.clone());
-                    app.host_list_idx = app.saved_hosts.len() - 1;
-                }
-                save_hosts(&app.saved_hosts);
-                app.pending_remote_host = input;
-                app.mode = AppMode::PasswordInput;
-                app.input_password.clear();
-                app.show_password = false;
-            }
+            app.pending_remote_host = app.input_remote_host.trim().to_string();
+            app.mode = AppMode::RemotePortInput; // Next step
+            app.input_remote_port = "22".to_string(); // Default
+            app.input_cursor_pos = app.input_remote_port.len(); // Set cursor to end
             HandlerResult::Continue
         }
         KeyCode::Left => {
@@ -265,10 +254,67 @@ fn handle_remote_host_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult 
     }
 }
 
-fn handle_password_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
+fn handle_remote_port_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
     match key.code {
         KeyCode::Esc => {
             app.mode = AppMode::RemoteHostInput;
+            HandlerResult::Continue
+        }
+        KeyCode::Enter => {
+            if let Ok(p) = app.input_remote_port.trim().parse::<u16>() {
+                app.pending_remote_port = Some(p);
+            } else {
+                app.pending_remote_port = Some(22); // Fallback if invalid
+            }
+            app.mode = AppMode::PasswordInput; // Next step
+            app.input_password.clear();
+            app.show_password = false;
+            HandlerResult::Continue
+        }
+        KeyCode::Backspace => {
+            if !app.input_remote_port.is_empty() {
+                app.input_remote_port.pop();
+                if app.input_cursor_pos > 0 {
+                    app.input_cursor_pos -= 1;
+                }
+            }
+            HandlerResult::Continue
+        }
+        KeyCode::Left => {
+            if app.input_cursor_pos > 0 {
+                app.input_cursor_pos -= 1;
+            }
+            HandlerResult::Continue
+        }
+        KeyCode::Right => {
+            if app.input_cursor_pos < app.input_remote_port.len() {
+                app.input_cursor_pos += 1;
+            }
+            HandlerResult::Continue
+        }
+        KeyCode::Home => {
+            app.input_cursor_pos = 0;
+            HandlerResult::Continue
+        }
+        KeyCode::End => {
+            app.input_cursor_pos = app.input_remote_port.len();
+            HandlerResult::Continue
+        }
+        KeyCode::Char(c) => {
+            if c.is_ascii_digit() { // Only allow numbers
+                app.input_remote_port.insert(app.input_cursor_pos, c);
+                app.input_cursor_pos += 1;
+            }
+            HandlerResult::Continue
+        }
+        _ => HandlerResult::Continue,
+    }
+}
+
+fn handle_password_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
+    match key.code {
+        KeyCode::Esc => {
+            app.mode = AppMode::RemotePortInput;
             HandlerResult::Continue
         }
         KeyCode::Enter => {
@@ -331,6 +377,7 @@ fn handle_sync_mode_select_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
             app.mode = AppMode::RemoteBrowser;
             match send_req(ClientRequest::GetRemoteHome(
                 app.pending_remote_host.clone(),
+                app.pending_remote_port,
                 app.pending_password.clone()
             )) {
                 ServerResponse::RemoteHome(path) => {
@@ -343,6 +390,7 @@ fn handle_sync_mode_select_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
             
             match send_req(ClientRequest::ListRemoteDirs(
                 app.pending_remote_host.clone(),
+                app.pending_remote_port,
                 app.remote_current_path.clone(),
                 app.pending_password.clone()
             )) {
@@ -408,6 +456,7 @@ fn handle_remote_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
             
             match send_req(ClientRequest::ListRemoteDirs(
                 app.pending_remote_host.clone(),
+                app.pending_remote_port,
                 app.remote_current_path.clone(),
                 app.pending_password.clone()
             )) {
@@ -430,6 +479,7 @@ fn handle_remote_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                 id: task_id,
                 source: app.pending_source.clone(),
                 remote_host: app.pending_remote_host.clone(),
+                remote_port: app.pending_remote_port,
                 remote_path: app.remote_current_path.clone(),
                 status: "STARTING".to_string(),
                 last_log: "Created".to_string(),

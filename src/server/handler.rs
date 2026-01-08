@@ -17,10 +17,6 @@ pub async fn handle_request(
             let list: Vec<SyncTask> = s.tasks.values().cloned().collect();
             ServerResponse::State(list)
         }
-        ClientRequest::GetRemoteHost => {
-            let s = state.lock().unwrap();
-            ServerResponse::RemoteHost(s.remote_host.clone())
-        }
         ClientRequest::ListLocalDirs(path) => {
             // BROWSER LOGIC: Read dir contents (ASYNC)
             let p = if path.is_empty() {
@@ -46,13 +42,13 @@ pub async fn handle_request(
                 Err(e) => ServerResponse::Error(format!("{}", e)),
             }
         }
-        ClientRequest::ListRemoteDirs(host, path, password) => {
+        ClientRequest::ListRemoteDirs(host, port,path, password) => {
             // Use the host and password from the client request
-            let dirs = list_remote_dirs_ssh(&host, &path, &password).await;
+            let dirs = list_remote_dirs_ssh(&host, port, &path, &password).await;
             ServerResponse::DirList(dirs)
         }
-        ClientRequest::GetRemoteHome(host, password) => {
-            let path = get_remote_home_ssh(&host, &password).await;
+        ClientRequest::GetRemoteHome(host, port, password) => {
+            let path = get_remote_home_ssh(&host, port, &password).await;
             ServerResponse::RemoteHome(path)
         }
         ClientRequest::StartTask(task) => {
