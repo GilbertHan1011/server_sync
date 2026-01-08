@@ -254,7 +254,7 @@ fn draw_remote_host_input(f: &mut Frame, app: &App, size: Rect) {
     };
     
     let input_block = Paragraph::new(format!(
-        "Remote Host (user@hostname):\n\n{}",
+        "Remote Host (user@hostname:port):\n\n{}",
         display_text
     ))
     .block(Block::default()
@@ -268,7 +268,7 @@ fn draw_remote_host_input(f: &mut Frame, app: &App, size: Rect) {
 }
 
 fn draw_remote_port_input(f: &mut Frame, app: &App, size: Rect) {
-    let area = centered_rect(60, 25, size);
+    let area = centered_rect(70, 25, size);
     f.render_widget(Clear, area);
     
     let input_chunks = Layout::default()

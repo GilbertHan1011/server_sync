@@ -206,10 +206,36 @@ fn handle_remote_host_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult 
             HandlerResult::Continue
         }
         KeyCode::Enter => {
-            app.pending_remote_host = app.input_remote_host.trim().to_string();
-            app.mode = AppMode::RemotePortInput; // Next step
-            app.input_remote_port = "22".to_string(); // Default
-            app.input_cursor_pos = app.input_remote_port.len(); // Set cursor to end
+            let input = app.input_remote_host.trim();
+            
+            // Logic to handle "user@host:port" format
+            // We split by the last ':' and check if the remainder is a number
+            let (host, port_str) = if let Some(idx) = input.rfind(':') {
+                let (h, p_str) = input.split_at(idx);
+                let potential_port = &p_str[1..]; // Skip the ':'
+                
+                // Only treat as port if it parses successfully (avoids breaking IPv6)
+                if potential_port.parse::<u16>().is_ok() {
+                    (h, Some(potential_port))
+                } else {
+                    (input, None)
+                }
+            } else {
+                (input, None)
+            };
+
+            app.pending_remote_host = host.to_string();
+            
+            // Setup next step: Port Input
+            app.mode = AppMode::RemotePortInput; 
+            
+            if let Some(p) = port_str {
+                app.input_remote_port = p.to_string(); // Use typed port
+            } else {
+                app.input_remote_port = "22".to_string(); // Default
+            }
+            
+            app.input_cursor_pos = app.input_remote_port.len(); 
             HandlerResult::Continue
         }
         KeyCode::Left => {
