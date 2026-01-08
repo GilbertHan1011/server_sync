@@ -1,4 +1,6 @@
-use std::{io::{Read, Write}, os::unix::net::UnixStream, path::Path, panic, fs::File, sync::atomic::{AtomicBool, Ordering}, time::Duration};
+use std::panic;
+use std::fs::File;
+use std::sync::atomic::{AtomicBool, Ordering};
 use simplelog::*;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
@@ -7,148 +9,17 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
     Terminal,
 };
-use server_sync::protocol::{SyncTask, ClientRequest, ServerResponse, SyncMode};
+use server_sync::protocol::{ClientRequest, ServerResponse, SyncMode};
+use server_sync::client::state::{App, AppMode};
+use server_sync::client::network::send_req;
+use server_sync::client::ui::draw;
+use server_sync::client::handler::{handle_key_event, HandlerResult};
+use server_sync::client::config::load_hosts;
 
 // Global flag for Ctrl+C
 static CTRL_C_PRESSED: AtomicBool = AtomicBool::new(false);
-
-// --- UI STATE ---
-enum AppMode {
-    Dashboard,
-    LocalBrowser,     // Browse local directories (source selection)
-    RemoteHostInput,  // Edit remote host before browsing remote
-    HostSelect,
-    PasswordInput,    // Enter SSH password (optional)
-    SyncModeSelect,   // Select sync mode (Mirror, AddOnly, SafeSync, Update)
-    RemoteBrowser,    // Browse remote directories (destination selection)
-    DryRunView,       // Display dry run results
-}
-
-struct App {
-    mode: AppMode,
-    tasks: Vec<SyncTask>,
-    // Browser State
-    current_path: String,
-    dir_entries: Vec<String>,
-    selected_idx: usize,
-    // Task Creation State
-    pending_source: String,        // Selected local path before remote browsing
-    remote_current_path: String,   // Current path in remote browser
-    pending_remote_host: String,   // Remote host (e.g., "user@host")
-    // Remote Host Input State
-    input_remote_host: String,     // User's edited remote host
-    input_cursor_pos: usize,       // Cursor position in input field
-    // Password Input State
-    pending_password: Option<String>, // Stores the final confirmed password
-    input_password: String,           // Buffer for typing password
-    show_password: bool,              // Toggle to show/hide characters
-    // Sync Mode Selection State
-    pending_sync_mode: SyncMode,   // Selected sync mode
-    pending_compress: bool,        // Compression enabled
-    sync_mode_selected_idx: usize, // 0-3 for the 4 modes
-    // Dry Run State
-    dry_run_results: Vec<String>,  // Results from dry run
-    dry_run_task_id: String,       // Which task was dry-run
-    dry_run_scroll: usize,         // Scroll position in dry run view
-    // Saved Host Names
-    saved_hosts: Vec<String>,
-    host_list_idx: usize,
-    is_editing_host: bool,
-}
-
-
-fn load_hosts() -> Vec<String> {
-    let path = get_host_path();
-    if let Ok(content) = std::fs::read_to_string(path) {
-        content.lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty() && !l.starts_with("#"))
-            .collect()
-    } else{
-        vec![]
-    }
-}
-
-fn save_hosts(hosts: &Vec<String>) {
-    let path = get_host_path();
-    let content = hosts.join("\n");
-    let _ = std::fs::write(path, content);
-}
-
-fn send_req(req: ClientRequest) -> ServerResponse {
-    let socket_path = get_socket_path();
-    log::info!("Sending request: {:?}", req); // Log before connecting
-
-    match UnixStream::connect(&socket_path) {
-        Ok(mut stream) => {
-            // 1. Set Timeout (Fixes the hang)
-            if let Err(e) = stream.set_read_timeout(Some(Duration::from_secs(3))) {
-                log::error!("Failed to set timeout: {}", e);
-            }
-            if let Err(e) = stream.set_write_timeout(Some(Duration::from_secs(3))) {
-                log::error!("Failed to set timeout: {}", e);
-            }
-
-            let json = match serde_json::to_string(&req) {
-                Ok(j) => j,
-                Err(e) => {
-                    return ServerResponse::Error(format!("Serialization error: {}", e));
-                }
-            };
-            
-            if stream.write_all(json.as_bytes()).is_err() {
-                return ServerResponse::Error("Failed to send request".to_string());
-            }
-            
-            let mut buf = vec![0; 65535];
-            match stream.read(&mut buf) {
-                Ok(n) if n > 0 => {
-                    log::info!("Received response ({} bytes)", n); // Log success
-                    match serde_json::from_slice(&buf[..n]) {
-                        Ok(resp) => resp,
-                        Err(e) => {
-                            ServerResponse::Error(format!("Parse error: {}", e))
-                        }
-                    }
-                }
-                Ok(_) => ServerResponse::Error("Empty response".to_string()),
-                Err(e) => {
-                    log::error!("Read error (Server timed out?): {}", e);
-                    ServerResponse::Error(format!("Read error: {}", e))
-                }
-            }
-        }
-        Err(e) => {
-            log::warn!("Could not connect to daemon: {}", e);
-            ServerResponse::Error("Daemon not running!".to_string())
-        }
-    }
-}
-
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(r);
-    
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(popup_layout[1])[1]
-}
 
 fn main() -> anyhow::Result<()> {
     // 0. Initialize Logging
@@ -163,7 +34,6 @@ fn main() -> anyhow::Result<()> {
     // 0.5. Setup Ctrl+C handler (BEFORE terminal setup)
     ctrlc::set_handler(|| {
         CTRL_C_PRESSED.store(true, Ordering::Relaxed);
-        // Try to restore terminal immediately
         let _ = crossterm::terminal::disable_raw_mode();
         let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen, crossterm::event::DisableMouseCapture);
     })?;
@@ -171,7 +41,6 @@ fn main() -> anyhow::Result<()> {
     // 1. Install Panic Hook (The Safety Net)
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {
-        // Force-restore terminal before printing the error
         let _ = crossterm::terminal::disable_raw_mode();
         let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen, crossterm::event::DisableMouseCapture);
         original_hook(panic_info);
@@ -205,23 +74,24 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
     let start_path = std::env::current_dir()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| std::env::var("HOME").unwrap_or_else(|_| "/".to_string()));
+    
     let mut app = App {
         mode: AppMode::Dashboard,
         tasks: vec![],
-        current_path: start_path, // Start here
+        current_path: start_path,
         dir_entries: vec![],
         selected_idx: 0,
         pending_source: String::new(),
         remote_current_path: String::new(),
-        pending_remote_host: String::new(), // Will be fetched from server
+        pending_remote_host: String::new(),
         input_remote_host: String::new(),
         input_cursor_pos: 0,
         pending_password: None,
         input_password: String::new(),
         show_password: false,
-        pending_sync_mode: SyncMode::Mirror, // Default: Mirror mode
-        pending_compress: true,               // Default: Enable compression
-        sync_mode_selected_idx: 0,           // Start at first option
+        pending_sync_mode: SyncMode::Mirror,
+        pending_compress: true,
+        sync_mode_selected_idx: 0,
         dry_run_results: vec![],
         dry_run_task_id: String::new(),
         dry_run_scroll: 0,
@@ -237,11 +107,11 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
         }
         ServerResponse::Error(e) => {
             eprintln!("Warning: Could not fetch remote host from server: {}", e);
-            app.pending_remote_host = "user@remote".to_string(); // Fallback
+            app.pending_remote_host = "user@remote".to_string();
         }
         _ => {
             eprintln!("Warning: Unexpected response when fetching remote host");
-            app.pending_remote_host = "user@remote".to_string(); // Fallback
+            app.pending_remote_host = "user@remote".to_string();
         }
     }
 
@@ -259,7 +129,6 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
                     app.tasks = t;
                 }
                 ServerResponse::Error(e) => {
-                    // If daemon not running, show error but don't crash
                     if e.contains("not running") {
                         app.tasks = vec![];
                     }
@@ -270,287 +139,7 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
 
         // 2. RENDER
         terminal.draw(|f| {
-            let size = f.area();
-
-            // --- DASHBOARD ---
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Percentage(80), Constraint::Percentage(20)])
-                .split(size);
-
-                let items: Vec<ListItem> = app.tasks.iter().map(|t| {
-                let color = match t.status.as_str() {
-                    "IDLE" => Color::Green,
-                    "ERROR" => Color::Red,
-                    "SYNCING..." => Color::Yellow,
-                    "PENDING..." => Color::Cyan,
-                    _ => Color::Blue,
-                };
-
-                let remote_display = format!("{}:{}", t.remote_host, t.remote_path);
-                let mode_name = match t.sync_mode {
-                    SyncMode::Mirror => "Mirror",
-                    SyncMode::AddOnly => "AddOnly",
-                    SyncMode::SafeSync => "SafeSync",
-                    SyncMode::Update => "Update",
-                };
-                let compress_flag = if t.compress { "+Z" } else { "" };
-                
-                ListItem::new(format!(
-                    "ID: {} | {} -> {}\n   [{}] Mode: {}{} | {}",
-                    t.id, t.source, remote_display, t.status, mode_name, compress_flag, t.last_log
-                ))
-                .style(Style::default().fg(color))
-            })
-            .collect();
-
-            let list = List::new(items)
-                .block(Block::default().title("Active Sync Tasks").borders(Borders::ALL));
-            f.render_widget(list, chunks[0]);
-
-            let help = Paragraph::new(
-                "Controls:\n[A] Add New Task (4-step wizard)\n[D] Delete Task (First ID)\n[R] Dry Run (First Task)\n[Q] Quit"
-            )
-            .block(Block::default().borders(Borders::ALL));
-            f.render_widget(help, chunks[1]);
-
-            // --- BROWSER POPUP ---
-            if let AppMode::LocalBrowser | AppMode::RemoteBrowser = app.mode {
-                let area = centered_rect(60, 60, size);
-                f.render_widget(Clear, area); // Clear background
-
-                let browser_chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Min(3), Constraint::Length(3)])
-                    .split(area);
-
-                // Dir List
-                let dirs: Vec<ListItem> = app
-                    .dir_entries
-                    .iter()
-                    .enumerate()
-                    .map(|(i, d)| {
-                        let style = if i == app.selected_idx {
-                            Style::default().bg(Color::Blue)
-                        } else {
-                            Style::default()
-                        };
-                        ListItem::new(d.clone()).style(style)
-                    })
-                    .collect();
-
-                // Different titles and instructions based on mode
-                let (title, instructions_text) = match app.mode {
-                    AppMode::LocalBrowser => (
-                        format!("Select Source Folder: {}", app.current_path),
-                        "[Enter] Enter Dir  [Space] Select as Source  [Esc] Cancel"
-                    ),
-                    AppMode::RemoteBrowser => (
-                        format!("Select Remote Destination: {} (Interface may freeze during SSH)", 
-                            if app.remote_current_path.is_empty() { 
-                                format!("{}:/", app.pending_remote_host) 
-                            } else { 
-                                format!("{}:{}", app.pending_remote_host, app.remote_current_path) 
-                            }),
-                        "[Enter] Enter Dir  [Space] Select as Destination  [Esc] Cancel"
-                    ),
-                    _ => unreachable!(),
-                };
-
-                let b_block = Block::default()
-                    .title(title)
-                    .borders(Borders::ALL);
-                f.render_widget(List::new(dirs).block(b_block), browser_chunks[0]);
-
-                let instructions = Paragraph::new(instructions_text)
-                    .block(Block::default().borders(Borders::ALL));
-                f.render_widget(instructions, browser_chunks[1]);
-            }
-
-            // --- PASSWORD INPUT POPUP ---
-            if let AppMode::PasswordInput = app.mode {
-                let area = centered_rect(60, 25, size);
-                f.render_widget(Clear, area);
-                
-                let pass_chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(5), Constraint::Length(3)])
-                    .split(area);
-
-                let display_text = if app.show_password {
-                    format!("{}|", app.input_password)
-                } else {
-                    format!("{}|", "*".repeat(app.input_password.len()))
-                };
-
-                let input = Paragraph::new(format!(
-                    "SSH Password (leave empty for SSH keys):\n\n{}",
-                    display_text
-                ))
-                    .block(Block::default()
-                        .title("Step 3: Enter SSH Password")
-                        .borders(Borders::ALL));
-                f.render_widget(input, pass_chunks[0]);
-
-                let help = Paragraph::new("[Enter] Confirm  [Tab] Show/Hide  [Esc] Back")
-                    .block(Block::default().borders(Borders::ALL));
-                f.render_widget(help, pass_chunks[1]);
-            }
-
-            if let AppMode::HostSelect = app.mode {
-                let area = centered_rect(60, 60, size);
-                f.render_widget(Clear, area);
-                
-                let chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Min(3), Constraint::Length(3)])
-                    .split(area);
-            
-                let items: Vec<ListItem> = app.saved_hosts
-                    .iter()
-                    .enumerate()
-                    .map(|(i, h)| {
-                        let style = if i == app.host_list_idx {
-                            Style::default().bg(Color::Blue).fg(Color::White)
-                        } else {
-                            Style::default()
-                        };
-                        ListItem::new(h.as_str()).style(style)
-                    })
-                    .collect();
-            
-                let list = List::new(items)
-                    .block(Block::default()
-                        .title("Step 2: Select Remote Host")
-                        .borders(Borders::ALL));
-                f.render_widget(list, chunks[0]);
-            
-                let instructions = Paragraph::new("[Enter] Select  [A] Add  [E] Edit  [D] Delete")
-                    .block(Block::default().borders(Borders::ALL));
-                f.render_widget(instructions, chunks[1]);
-            }
-
-            // --- REMOTE HOST INPUT POPUP ---
-            if let AppMode::RemoteHostInput = app.mode {
-                let area = centered_rect(70, 25, size);
-                f.render_widget(Clear, area);
-                
-                let input_chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(5), Constraint::Length(3)])
-                    .split(area);
-                
-                // Show the input field with cursor
-                let display_text = if app.input_cursor_pos <= app.input_remote_host.len() {
-                    if app.input_cursor_pos < app.input_remote_host.len() {
-                        format!("{}|{}", 
-                            &app.input_remote_host[..app.input_cursor_pos],
-                            &app.input_remote_host[app.input_cursor_pos..])
-                    } else {
-                        format!("{}|", app.input_remote_host)
-                    }
-                } else {
-                    format!("{}|", app.input_remote_host)
-                };
-                
-                let input_block = Paragraph::new(format!(
-                    "Remote Host (user@hostname):\n\n{}",
-                    display_text
-                ))
-                    .block(Block::default()
-                        .title("Step 2: Confirm/Edit Remote Host")
-                        .borders(Borders::ALL));
-                f.render_widget(input_block, input_chunks[0]);
-                
-                let instructions = Paragraph::new("[Enter] Continue  [Esc] Back  [←→] Move  [Home/End] Jump")
-                    .block(Block::default().borders(Borders::ALL));
-                f.render_widget(instructions, input_chunks[1]);
-            }
-
-            // --- SYNC MODE SELECT POPUP ---
-            if let AppMode::SyncModeSelect = app.mode {
-                let area = centered_rect(70, 50, size);
-                f.render_widget(Clear, area);
-                
-                let sync_chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Min(10), Constraint::Length(3)])
-                    .split(area);
-                
-                // Mode descriptions
-                let modes = vec![
-                    ("Mirror", "Exact copy. Deletes files on remote if missing on local", Color::Yellow),
-                    ("Add Only", "Uploads new/changed files. Never deletes on remote", Color::Green),
-                    ("Safe Sync", "Mirrors but moves deleted files to .rsync-backup folder", Color::Cyan),
-                    ("Update", "Only overwrites if local file is newer", Color::Blue),
-                ];
-                
-                let mut mode_items: Vec<ListItem> = vec![];
-                for (idx, (name, desc, color)) in modes.iter().enumerate() {
-                    let prefix = if idx == app.sync_mode_selected_idx { "> " } else { "  " };
-                    let text = format!("{}{}", prefix, name);
-                    let item = if idx == app.sync_mode_selected_idx {
-                        ListItem::new(vec![
-                            ratatui::text::Line::from(text).style(Style::default().fg(*color).bg(Color::DarkGray)),
-                            ratatui::text::Line::from(format!("  {}", desc)).style(Style::default().fg(Color::Gray)),
-                        ])
-                    } else {
-                        ListItem::new(vec![
-                            ratatui::text::Line::from(text).style(Style::default().fg(*color)),
-                            ratatui::text::Line::from(format!("  {}", desc)).style(Style::default().fg(Color::DarkGray)),
-                        ])
-                    };
-                    mode_items.push(item);
-                }
-                
-                // Add compression toggle
-                let compress_text = if app.pending_compress {
-                    "[X] Enable Compression (-z)"
-                } else {
-                    "[ ] Enable Compression (-z)"
-                };
-                mode_items.push(ListItem::new(""));
-                mode_items.push(ListItem::new(compress_text).style(Style::default().fg(Color::White)));
-                
-                let mode_list = List::new(mode_items)
-                    .block(Block::default()
-                        .title("Step 4: Select Sync Mode")
-                        .borders(Borders::ALL));
-                f.render_widget(mode_list, sync_chunks[0]);
-                
-                let instructions = Paragraph::new("[Enter] Continue  [↑↓] Navigate  [Space] Toggle Compress  [Esc] Back")
-                    .block(Block::default().borders(Borders::ALL));
-                f.render_widget(instructions, sync_chunks[1]);
-            }
-
-            // --- DRY RUN VIEW POPUP ---
-            if let AppMode::DryRunView = app.mode {
-                let area = centered_rect(80, 60, size);
-                f.render_widget(Clear, area);
-                
-                let dry_chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Min(10), Constraint::Length(3)])
-                    .split(area);
-                
-                // Create list items from dry run results
-                let items: Vec<ListItem> = app.dry_run_results
-                    .iter()
-                    .skip(app.dry_run_scroll)
-                    .take(area.height as usize - 5) // Leave space for title and help
-                    .map(|s| ListItem::new(s.as_str()))
-                    .collect();
-                
-                let list = List::new(items)
-                    .block(Block::default()
-                        .title(format!("Dry Run Results: {}", app.dry_run_task_id))
-                        .borders(Borders::ALL));
-                f.render_widget(list, dry_chunks[0]);
-                
-                let help = Paragraph::new("[Esc] Close  [↑↓] Scroll")
-                    .block(Block::default().borders(Borders::ALL));
-                f.render_widget(help, dry_chunks[1]);
-            }
+            draw(f, &app);
         }).map_err(|_e| anyhow::anyhow!("Terminal draw error"))?;
 
         // 3. INPUT - Reduced timeout for responsive typing
@@ -562,415 +151,13 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
                     break;
                 }
                 
-                match app.mode {
-                    AppMode::Dashboard => match key.code {
-                        KeyCode::Char('q') | KeyCode::Char('Q') => break,
-                        KeyCode::Char('a') | KeyCode::Char('A') => {
-                            // Enter LocalBrowser Mode
-                            app.mode = AppMode::LocalBrowser;
-                            match send_req(ClientRequest::ListLocalDirs(app.current_path.clone())) {
-                                ServerResponse::DirList(d) => {
-                                    app.dir_entries = d;
-                                    app.dir_entries.insert(0, "..".to_string()); // Add parent navigation
-                                    app.selected_idx = 0;
-                                }
-                                ServerResponse::Error(e) => {
-                                    eprintln!("Error listing dirs: {}", e);
-                                    app.mode = AppMode::Dashboard;
-                                }
-                                _ => {}
-                            }
-                        }
-                        KeyCode::Char('d') | KeyCode::Char('D') => {
-                            // Quick hack: delete first task
-                            if let Some(t) = app.tasks.first() {
-                                send_req(ClientRequest::StopTask(t.id.clone()));
-                            }
-                        }
-                        KeyCode::Char('r') | KeyCode::Char('R') => {
-                            // Dry run first task
-                            if let Some(first_task) = app.tasks.first() {
-                                match send_req(ClientRequest::DryRun(first_task.id.clone())) {
-                                    ServerResponse::DryRunResult(changes) => {
-                                        app.dry_run_results = changes;
-                                        app.dry_run_task_id = first_task.id.clone();
-                                        app.dry_run_scroll = 0;
-                                        app.mode = AppMode::DryRunView;
-                                    }
-                                    ServerResponse::Error(e) => {
-                                        eprintln!("Dry run error: {}", e);
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        _ => {}
-                    },
-                    AppMode::LocalBrowser => match key.code {
-                        KeyCode::Esc => app.mode = AppMode::Dashboard,
-                        KeyCode::Down => {
-                            if app.selected_idx < app.dir_entries.len().saturating_sub(1) {
-                                app.selected_idx += 1;
-                            }
-                        }
-                        KeyCode::Up => {
-                            if app.selected_idx > 0 {
-                                app.selected_idx -= 1;
-                            }
-                        }
-                        KeyCode::Enter => {
-                            // Navigate into directory
-                            let selected = &app.dir_entries[app.selected_idx];
-                            let new_path = if selected == ".." {
-                                Path::new(&app.current_path)
-                                    .parent()
-                                    .unwrap_or(Path::new("/"))
-                                    .display()
-                                    .to_string()
-                            } else {
-                                format!("{}/{}", app.current_path, selected)
-                            };
-
-                            app.current_path = new_path.replace("//", "/"); // Clean path
-                            match send_req(ClientRequest::ListLocalDirs(app.current_path.clone())) {
-                                ServerResponse::DirList(d) => {
-                                    app.dir_entries = d;
-                                    app.dir_entries.insert(0, "..".to_string());
-                                    app.selected_idx = 0;
-                                }
-                                ServerResponse::Error(e) => {
-                                    eprintln!("Error navigating: {}", e);
-                                }
-                                _ => {}
-                            }
-                        }
-                        KeyCode::Char(' ') => {
-                            // STEP 1 COMPLETE: Source Selected
-                            app.pending_source = app.current_path.clone();
-
-                            app.saved_hosts = load_hosts();
-
-                            if app.saved_hosts.is_empty() {
-                                app.mode = AppMode::RemoteHostInput;
-                                app.input_remote_host = String::new();
-                                app.is_editing_host = false;
-                            } else {
-                                app.mode = AppMode::HostSelect;
-                                app.host_list_idx = 0;
-                            }
-                        }
-                        _ => {}
-                    },
-                    AppMode::HostSelect => match key.code {
-                        KeyCode::Esc => app.mode = AppMode::LocalBrowser, // Back
-                        KeyCode::Down => {
-                            if app.host_list_idx < app.saved_hosts.len().saturating_sub(1) {
-                                app.host_list_idx += 1;
-                            }
-                        }
-                        KeyCode::Up => {
-                            if app.host_list_idx > 0 {
-                                app.host_list_idx -= 1;
-                            }
-                        }
-                        // SELECT HOST
-                        KeyCode::Enter => {
-                            if !app.saved_hosts.is_empty() {
-                                app.pending_remote_host = app.saved_hosts[app.host_list_idx].clone();
-                                // Proceed to Password
-                                app.mode = AppMode::PasswordInput;
-                                app.input_password.clear();
-                                app.show_password = false;
-                            }
-                        }
-                        // ADD NEW HOST
-                        KeyCode::Char('a') | KeyCode::Char('A') => {
-                            app.mode = AppMode::RemoteHostInput;
-                            app.input_remote_host = String::new();
-                            app.input_cursor_pos = 0;
-                            app.is_editing_host = false; // Adding new
-                        }
-                        // EDIT SELECTED HOST
-                        KeyCode::Char('e') | KeyCode::Char('E') => {
-                            if !app.saved_hosts.is_empty() {
-                                app.mode = AppMode::RemoteHostInput;
-                                app.input_remote_host = app.saved_hosts[app.host_list_idx].clone();
-                                app.input_cursor_pos = app.input_remote_host.len();
-                                app.is_editing_host = true; // Editing existing
-                            }
-                        }
-                        // DELETE HOST
-                        KeyCode::Char('d') | KeyCode::Char('D') => {
-                            if !app.saved_hosts.is_empty() {
-                                app.saved_hosts.remove(app.host_list_idx);
-                                save_hosts(&app.saved_hosts); // Save to file immediately
-                                if app.host_list_idx >= app.saved_hosts.len() && !app.saved_hosts.is_empty() {
-                                    app.host_list_idx = app.saved_hosts.len() - 1;
-                                }
-                            }
-                        }
-                        _ => {}
-                    },
-                    AppMode::RemoteHostInput => match key.code {
-                        KeyCode::Esc => {
-                            if !app.saved_hosts.is_empty() {
-                                app.mode = AppMode::HostSelect;
-                            } else {
-                                app.mode = AppMode::LocalBrowser;  // Go back to local browser
-                            }
-                        }
-                        KeyCode::Enter => {
-                            let input = app.input_remote_host.trim().to_string();
-                            if !input.is_empty() {
-                                if app.is_editing_host {
-                                    // UPDATE existing
-                                    if app.host_list_idx < app.saved_hosts.len() {
-                                        app.saved_hosts[app.host_list_idx] = input.clone();
-                                    }
-                                } else {
-                                    // ADD new
-                                    app.saved_hosts.push(input.clone());
-                                    app.host_list_idx = app.saved_hosts.len() - 1; // Select the new one
-                                }
-                                // Save to disk
-                                save_hosts(&app.saved_hosts);
-                                // Set as pending and go to Password
-                                app.pending_remote_host = input;
-                                app.mode = AppMode::PasswordInput;
-                                app.input_password.clear();
-                                app.show_password = false;
-                            }
-                        }
-                        KeyCode::Left => {
-                            if app.input_cursor_pos > 0 {
-                                app.input_cursor_pos -= 1;
-                            }
-                        }
-                        KeyCode::Right => {
-                            if app.input_cursor_pos < app.input_remote_host.len() {
-                                app.input_cursor_pos += 1;
-                            }
-                        }
-                        KeyCode::Backspace => {
-                            if app.input_cursor_pos > 0 {
-                                app.input_remote_host.remove(app.input_cursor_pos - 1);
-                                app.input_cursor_pos -= 1;
-                            }
-                        }
-                        KeyCode::Delete => {
-                            if app.input_cursor_pos < app.input_remote_host.len() {
-                                app.input_remote_host.remove(app.input_cursor_pos);
-                            }
-                        }
-                        KeyCode::Home => {
-                            app.input_cursor_pos = 0;
-                        }
-                        KeyCode::End => {
-                            app.input_cursor_pos = app.input_remote_host.len();
-                        }
-                        KeyCode::Char(c) => {
-                            // Insert character at cursor
-                            app.input_remote_host.insert(app.input_cursor_pos, c);
-                            app.input_cursor_pos += 1;
-                        }
-                        _ => {}
-                    },
-                    AppMode::PasswordInput => match key.code {
-                        KeyCode::Esc => {
-                            app.mode = AppMode::RemoteHostInput;  // Go back
-                        }
-                        KeyCode::Enter => {
-                            // STEP 3 COMPLETE: Password Confirmed
-                            if app.input_password.trim().is_empty() {
-                                app.pending_password = None; // Empty means "Use SSH Keys"
-                            } else {
-                                app.pending_password = Some(app.input_password.clone());
-                            }
-                            // Proceed to Sync Mode Select
-                            app.mode = AppMode::SyncModeSelect;
-                            app.sync_mode_selected_idx = 0; // Reset to first mode
-                        }
-                        KeyCode::Tab => {
-                            app.show_password = !app.show_password;
-                        }
-                        KeyCode::Backspace => {
-                            app.input_password.pop();
-                        }
-                        KeyCode::Char(c) => {
-                            app.input_password.push(c);
-                        }
-                        _ => {}
-                    },
-                    AppMode::SyncModeSelect => match key.code {
-                        KeyCode::Esc => {
-                            app.mode = AppMode::PasswordInput;  // Go back to password input
-                        }
-                        KeyCode::Down => {
-                            if app.sync_mode_selected_idx < 3 {  // 0-3 for 4 modes
-                                app.sync_mode_selected_idx += 1;
-                            }
-                        }
-                        KeyCode::Up => {
-                            if app.sync_mode_selected_idx > 0 {
-                                app.sync_mode_selected_idx -= 1;
-                            }
-                        }
-                        KeyCode::Char(' ') => {
-                            // Toggle compression
-                            app.pending_compress = !app.pending_compress;
-                        }
-                        KeyCode::Enter => {
-                            // STEP 4 COMPLETE: Sync Mode Selected
-                            // Save the selected mode
-                            app.pending_sync_mode = match app.sync_mode_selected_idx {
-                                0 => SyncMode::Mirror,
-                                1 => SyncMode::AddOnly,
-                                2 => SyncMode::SafeSync,
-                                3 => SyncMode::Update,
-                                _ => SyncMode::Mirror,
-                            };
-                            
-                            // Switch to Remote Browser
-                            app.mode = AppMode::RemoteBrowser;
-                            match send_req(ClientRequest::GetRemoteHome(
-                                app.pending_remote_host.clone(),
-                                app.pending_password.clone()
-                            )) {
-                                ServerResponse::RemoteHome(path) => {
-                                    app.remote_current_path = path;
-                                }
-                                _ => {
-                                    app.remote_current_path = "/".to_string(); // Fallback
-                                }
-                            }
-                            
-                            // Fetch Remote Dirs using the host from user input
-                            match send_req(ClientRequest::ListRemoteDirs(
-                                app.pending_remote_host.clone(),
-                                app.remote_current_path.clone(),
-                                app.pending_password.clone()
-                            )) {
-                                ServerResponse::DirList(d) => {
-                                    app.dir_entries = d;
-                                    app.dir_entries.insert(0, "..".to_string());
-                                    app.selected_idx = 0;
-                                }
-                                ServerResponse::Error(e) => {
-                                    eprintln!("Error listing remote dirs: {}", e);
-                                    app.mode = AppMode::SyncModeSelect;
-                                }
-                                _ => {}
-                            }
-                        }
-                        _ => {}
-                    },
-                    AppMode::RemoteBrowser => match key.code {
-                        KeyCode::Esc => app.mode = AppMode::Dashboard, // Cancel
-                        KeyCode::Down => {
-                            if app.selected_idx < app.dir_entries.len().saturating_sub(1) {
-                                app.selected_idx += 1;
-                            }
-                        }
-                        KeyCode::Up => {
-                            if app.selected_idx > 0 {
-                                app.selected_idx -= 1;
-                            }
-                        }
-                        KeyCode::Enter => {
-                            // Navigate Remote Dir
-                            let selected = &app.dir_entries[app.selected_idx];
-                            let new_path = if selected == ".." {
-                                let p = std::path::Path::new(&app.remote_current_path);
-                                match p.parent() {
-                                    Some(parent) => {
-                                        let s = parent.to_string_lossy().to_string();
-                                        if s.is_empty() {
-                                            "/".to_string()
-                                        } else {
-                                            s
-                                        }
-                                    },
-                                    None => {
-                                        app.remote_current_path.clone()
-                                    }
-                                }
-                            } else {
-                                if app.remote_current_path == "/" {
-                                    format!("/{}", selected)
-                                } else {
-                                    format!("{}/{}", app.remote_current_path, selected)
-                                }
-                            };
-                            
-                            app.remote_current_path = new_path;
-                            
-                            // Fetch New Remote List using the host from user input
-                            match send_req(ClientRequest::ListRemoteDirs(
-                                app.pending_remote_host.clone(),
-                                app.remote_current_path.clone(),
-                                app.pending_password.clone()
-                            )) {
-                                ServerResponse::DirList(d) => {
-                                    app.dir_entries = d;
-                                    app.dir_entries.insert(0, "..".to_string());
-                                    app.selected_idx = 0;
-                                }
-                                ServerResponse::Error(e) => {
-                                    eprintln!("Error navigating remote: {}", e);
-                                }
-                                _ => {}
-                            }
-                        }
-                        KeyCode::Char(' ') => {
-                            // STEP 5 COMPLETE: Remote Dest Selected
-                            let task_id = format!("task_{}", app.tasks.len() + 1);
-                            
-                            let new_task = SyncTask {
-                                id: task_id,
-                                source: app.pending_source.clone(),
-                                remote_host: app.pending_remote_host.clone(),
-                                remote_path: app.remote_current_path.clone(),
-                                status: "STARTING".to_string(),
-                                last_log: "Created".to_string(),
-                                poll_interval: 5,
-                                sync_mode: app.pending_sync_mode.clone(),
-                                compress: app.pending_compress,
-                                password: app.pending_password.clone(),
-                            };
-                            
-                            match send_req(ClientRequest::StartTask(new_task)) {
-                                ServerResponse::Ack => {
-                                    app.mode = AppMode::Dashboard;
-                                    app.pending_source.clear();
-                                    app.remote_current_path.clear();
-                                }
-                                ServerResponse::Error(e) => {
-                                    eprintln!("Error starting task: {}", e);
-                                }
-                                _ => {}
-                            }
-                        }
-                        _ => {}
-                    },
-                    AppMode::DryRunView => match key.code {
-                        KeyCode::Esc => app.mode = AppMode::Dashboard,
-                        KeyCode::Down => {
-                            if app.dry_run_scroll < app.dry_run_results.len().saturating_sub(1) {
-                                app.dry_run_scroll += 1;
-                            }
-                        }
-                        KeyCode::Up => {
-                            if app.dry_run_scroll > 0 {
-                                app.dry_run_scroll -= 1;
-                            }
-                        }
-                        _ => {}
-                    }
+                // Handle key event using handler module
+                match handle_key_event(key, &mut app) {
+                    HandlerResult::Quit => break,
+                    HandlerResult::Continue => {}
                 }
             }
         }
-
-        // No extra sleep needed - poll() provides timing control
     }
 
     Ok(())

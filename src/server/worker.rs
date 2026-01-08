@@ -1,7 +1,19 @@
+use std::process::Stdio;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use regex::Regex;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command;
+use tokio::sync::mpsc;
+use notify::{Config, PollWatcher, RecursiveMode, Watcher};
+use crate::protocol::{SyncTask, SyncMode};
+use crate::common::utils::is_valid_host;
+use crate::server::state::{ServerState, update_status, update_log};
+use crate::server::ssh::setup_askpass_script;
 
 // --- SYNC WORKER ---
 // Spawns a dedicated thread for a single folder
-fn spawn_sync_worker(
+pub fn spawn_sync_worker(
     task_data: SyncTask,
     state_handle: Arc<Mutex<ServerState>>,
 ) -> mpsc::Sender<()> {
@@ -71,7 +83,7 @@ fn spawn_sync_worker(
 }
 
 // Wrapper to handle Retries with exponential backoff
-async fn retry_run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
+pub async fn retry_run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
     let mut attempts = 0;
     const MAX_RETRIES: u32 = 3;
 
@@ -103,7 +115,7 @@ async fn retry_run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
 }
 
 // Dry run: Show what would change without making changes
-async fn run_dry_run(task: &SyncTask) -> Vec<String> {
+pub async fn run_dry_run(task: &SyncTask) -> Vec<String> {
     // SECURITY: Validate host before using in rsync command
     if !is_valid_host(&task.remote_host) {
         return vec!["Error: Invalid remote host format".to_string()];
@@ -163,7 +175,7 @@ async fn run_dry_run(task: &SyncTask) -> Vec<String> {
     }
 }
 
-async fn run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
+pub async fn run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
     // SECURITY: Validate host before using in rsync command
     if !is_valid_host(&task.remote_host) {
         update_status(&task.id, "ERROR (Bad Host)", state);
@@ -289,7 +301,7 @@ async fn run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
 
 
 // --- PROGRESS PARSING ---
-fn parse_rsync_percentage(line: &str) -> Option<u32> {
+pub fn parse_rsync_percentage(line: &str) -> Option<u32> {
     // rsync --info=progress2 format: "   1,234,567  12%  123.45kB/s    0:00:12"
     let re = Regex::new(r"\s+(\d+)%").ok()?;
     re.captures(line)

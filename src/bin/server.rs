@@ -1,79 +1,17 @@
-use std::{collections::HashMap, fs, sync::{Arc, Mutex}, time::Duration};
+use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::process::Stdio;
-use tokio::process::Command;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::{net::UnixListener, io::{AsyncReadExt, AsyncWriteExt}, sync::mpsc, fs as tokio_fs};
-use notify::{Config, PollWatcher, RecursiveMode, Watcher};
-use server_sync::protocol::{SyncTask, ClientRequest, ServerResponse, SyncMode};
-use serde::Deserialize;
-use clap::Parser;
+use tokio::net::UnixListener;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use daemonize::Daemonize;
-use regex::Regex;
-
-// --- CLI ARGUMENTS ---
-#[derive(Parser)]
-#[command(name = "server_sync")]
-#[command(about = "File synchronization daemon server", long_about = None)]
-struct ServerArgs {
-    /// Path to configuration file
-    #[arg(short, long, default_value = "server_config.yaml")]
-    config: String,
-    
-    /// Path to log file (stdout if not provided)
-    #[arg(short, long)]
-    log: Option<String>,
-    
-    /// Run in foreground instead of daemonizing
-    #[arg(short, long)]
-    foreground: bool,
-}
-
-
-
-// --- SERVER CONFIG ---
-#[derive(Debug, Deserialize, Clone)]
-struct ServerConfig {
-    remote_host: String,
-}
-
-fn load_server_config(config_path: &str) -> ServerConfig {
-    match fs::read_to_string(config_path) {
-        Ok(content) => {
-            match serde_yaml::from_str(&content) {
-                Ok(config) => config,
-                Err(e) => {
-                    eprintln!("Failed to parse {}: {}. Using default config.", config_path, e);
-                    ServerConfig {
-                        remote_host: "user@remote".to_string(),
-                    }
-                }
-            }
-        }
-        Err(_) => {
-            eprintln!("Config file {} not found. Using default config.", config_path);
-            ServerConfig {
-                remote_host: "user@remote".to_string(),
-            }
-        }
-    }
-}
-
-
-fn update_status(id: &str, status: &str, state: &Arc<Mutex<ServerState>>) {
-    let mut s = state.lock().unwrap();
-    if let Some(t) = s.tasks.get_mut(id) {
-        t.status = status.to_string();
-    }
-}
-
-fn update_log(id: &str, log: &str, state: &Arc<Mutex<ServerState>>) {
-    let mut s = state.lock().unwrap();
-    if let Some(t) = s.tasks.get_mut(id) {
-        t.last_log = format!("[{}] {}", chrono::Local::now().format("%H:%M:%S"), log);
-    }
-}
-
+use clap::Parser;
+use server_sync::protocol::ClientRequest;
+use server_sync::server::config::{ServerArgs, load_server_config};
+use server_sync::server::state::{ServerState, load_tasks};
+use server_sync::server::worker::spawn_sync_worker;
+use server_sync::server::handler::handle_request;
+use server_sync::common::utils::get_socket_path;
+use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
 
 // --- MAIN ---
 // Synchronous main - daemonize BEFORE tokio runtime
@@ -126,7 +64,6 @@ fn main() -> anyhow::Result<()> {
 
 // Async server logic - runs AFTER daemonization
 async fn run_server(args: ServerArgs) -> anyhow::Result<()> {
-    
     let socket_path = get_socket_path();
 
     // Load configuration
@@ -193,115 +130,8 @@ async fn run_server(args: ServerArgs) -> anyhow::Result<()> {
                             }
                         };
 
-                        // Process Request
-                        let resp = match req {
-                            ClientRequest::GetState => {
-                                let s = state_ref.lock().unwrap();
-                                let list: Vec<SyncTask> = s.tasks.values().cloned().collect();
-                                ServerResponse::State(list)
-                            }
-                            ClientRequest::GetRemoteHost => {
-                                let s = state_ref.lock().unwrap();
-                                ServerResponse::RemoteHost(s.remote_host.clone())
-                            }
-                            ClientRequest::ListLocalDirs(path) => {
-                                // BROWSER LOGIC: Read dir contents (ASYNC)
-                                let p = if path.is_empty() {
-                                    "/".to_string()
-                                } else {
-                                    path
-                                };
-
-                                match tokio_fs::read_dir(&p).await {
-                                    Ok(mut entries) => {
-                                        let mut dirs = Vec::new();
-                                        while let Ok(Some(entry)) = entries.next_entry().await {
-                                            if let Ok(metadata) = entry.metadata().await {
-                                                if metadata.is_dir() {
-                                                    if let Ok(name) = entry.file_name().into_string() {
-                                                        dirs.push(name);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        ServerResponse::DirList(dirs)
-                                    }
-                                    Err(e) => ServerResponse::Error(e.to_string()),
-                                }
-                            }
-                            ClientRequest::ListRemoteDirs(host, path, password) => {
-                                // Use the host and password from the client request
-                                let dirs = list_remote_dirs_ssh(&host, &path, &password).await;
-                                ServerResponse::DirList(dirs)
-                            }
-                            ClientRequest::GetRemoteHome(host, password) => {
-                                let path = get_remote_home_ssh(&host, &password).await;
-                                ServerResponse::RemoteHome(path)
-                            }
-                            ClientRequest::StartTask(task) => {
-                                // SECURITY: Validate host before starting task
-                                if !is_valid_host(&task.remote_host) {
-                                    ServerResponse::Error("Invalid remote host format".to_string())
-                                } else {
-                                    let task_id = task.id.clone();
-                                    let mut s = state_ref.lock().unwrap();
-                                    if !s.tasks.contains_key(&task_id) {
-                                        let task_clone = task.clone();
-                                        let stopper = spawn_sync_worker(task_clone, state_ref.clone());
-                                        s.tasks.insert(task_id.clone(), task);
-                                        s.stoppers.insert(task_id, stopper);
-                                        
-                                        // Save tasks to disk (ASYNC - spawn to avoid blocking)
-                                        let tasks_to_save = s.tasks.clone();
-                                        tokio::spawn(async move {
-                                            if let Err(e) = save_tasks(&tasks_to_save).await {
-                                                eprintln!("Warning: Failed to save tasks: {}", e);
-                                            }
-                                        });
-                                        
-                                        ServerResponse::Ack
-                                    } else {
-                                        ServerResponse::Error(format!("Task {} already exists", task_id))
-                                    }
-                                }
-                            }
-                            ClientRequest::StopTask(id) => {
-                                let stopper = {
-                                    let mut s = state_ref.lock().unwrap();
-                                    s.stoppers.remove(&id)
-                                };
-                                
-                                if let Some(tx) = stopper {
-                                    let _ = tx.send(()).await; // Kill thread
-                                }
-                                
-                                let mut s = state_ref.lock().unwrap();
-                                s.tasks.remove(&id);
-                                
-                                // Save tasks to disk (ASYNC - spawn to avoid blocking)
-                                let tasks_to_save = s.tasks.clone();
-                                tokio::spawn(async move {
-                                    if let Err(e) = save_tasks(&tasks_to_save).await {
-                                        eprintln!("Warning: Failed to save tasks: {}", e);
-                                    }
-                                });
-                                
-                                ServerResponse::Ack
-                            }
-                            ClientRequest::DryRun(task_id) => {
-                                let task = {
-                                    let s = state_ref.lock().unwrap();
-                                    s.tasks.get(&task_id).cloned()
-                                };
-                                
-                                if let Some(task) = task {
-                                    let changes = run_dry_run(&task).await;
-                                    ServerResponse::DryRunResult(changes)
-                                } else {
-                                    ServerResponse::Error(format!("Task {} not found", task_id))
-                                }
-                            }
-                        };
+                        // Process Request using handler
+                        let resp = handle_request(req, state_ref.clone()).await;
 
                         // Send Response
                         match serde_json::to_string(&resp) {

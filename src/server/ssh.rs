@@ -1,6 +1,10 @@
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use tokio::process::Command;
+use crate::common::utils::is_valid_host;
 
 // --- REMOTE DIRECTORY LISTING ---
-async fn list_remote_dirs_ssh(remote_host: &str, path: &str, password: &Option<String>) -> Vec<String> {
+pub async fn list_remote_dirs_ssh(remote_host: &str, path: &str, password: &Option<String>) -> Vec<String> {
     // SECURITY: Validate host before using in SSH command
     if !is_valid_host(remote_host) {
         return vec!["Error: Invalid remote host format".to_string()];
@@ -51,7 +55,7 @@ async fn list_remote_dirs_ssh(remote_host: &str, path: &str, password: &Option<S
     }
 }
 
-async fn get_remote_home_ssh(remote_host: &str, password: &Option<String>) -> String {
+pub async fn get_remote_home_ssh(remote_host: &str, password: &Option<String>) -> String {
     if !is_valid_host(remote_host) {
         return "/".to_string();
     }
@@ -85,10 +89,8 @@ async fn get_remote_home_ssh(remote_host: &str, password: &Option<String>) -> St
         _ => "/".to_string(),
     }
 }
-    // ---------------------
 
-
-    fn setup_askpass_script() -> std::io::Result<String> {
+pub fn setup_askpass_script() -> std::io::Result<String> {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         // Ensure directory exists
         let dir = format!("{}/.ssh/sockets", home);
