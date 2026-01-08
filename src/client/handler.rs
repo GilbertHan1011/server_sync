@@ -120,8 +120,18 @@ fn handle_local_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
             HandlerResult::Continue
         }
         KeyCode::Char(' ') => {
+            let selected_item = &app.dir_entries[app.selected_idx];
+            let final_path = if selected_item == ".." {
+                app.current_path.clone()
+            } else {
+                if app.current_path == "/" {
+                    format!("/{}", selected_item)
+                } else {
+                    format!("{}/{}", app.current_path, selected_item)
+                }
+            };
             // STEP 1 COMPLETE: Source Selected
-            app.pending_source = app.current_path.clone();
+            app.pending_source = final_path;
             app.saved_hosts = load_hosts();
 
             if app.saved_hosts.is_empty() {
