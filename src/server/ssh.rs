@@ -40,7 +40,7 @@ pub async fn list_remote_dirs_ssh(remote_host: &str, port: Option<u16>, path: &s
         .arg("-o").arg("ControlPath=~/.ssh/sockets/%r@%h-%p")
         .arg("-o").arg("ControlPersist=600")
         .arg(remote_host)
-        .arg(format!("ls -1F --group-directories-first {}", target_path))
+        .arg(format!("ls -1F --group-directories-first \"{}\"", target_path))
         .output()
         .await;
 

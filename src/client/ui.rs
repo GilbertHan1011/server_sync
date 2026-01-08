@@ -163,7 +163,7 @@ fn draw_remote_browser(f: &mut Frame, app: &App, size: Rect) {
             format!("{}:{}", app.pending_remote_host, app.remote_current_path) 
         }
     );
-    let instructions_text = "[Enter] Enter Dir  [Space] Select as Destination  [Esc] Cancel";
+    let instructions_text = "[Enter] Enter Dir  [Space] Select  [N] Create dir [Esc] Cancel";
 
     let b_block = Block::default()
         .title(title)

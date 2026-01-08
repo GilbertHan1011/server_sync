@@ -48,34 +48,45 @@ pub fn spawn_sync_worker(
         });
 
         // 3. Event Loop
-        let mut debounce = None;
+        let mut debounce_deadline: Option<tokio::time::Instant> = None;
         
         loop {
+            // Determine how long to sleep in the select! block
+            let timeout = if let Some(deadline) = debounce_deadline {
+                let now = tokio::time::Instant::now();
+                if now >= deadline {
+                    Duration::from_millis(0) // Trigger immediately
+                } else {
+                    deadline - now
+                }
+            } else {
+                Duration::from_secs(3600) // Sleep forever (almost) if nothing to do
+            };
+
             tokio::select! {
+                // 1. Kill Signal
                 _ = rx_kill.recv() => {
                     update_log(&task_id, "Stopped", &state_handle);
                     break;
                 }
+                
+                // 2. File Change Detected
                 _ = rx_file.recv() => {
-                    // Only set debounce if we aren't already waiting
-                    // This creates a "grouping" window of 2 seconds
-                    if debounce.is_none() {
+                    if debounce_deadline.is_none() {
                         update_status(&task_id, "PENDING...", &state_handle);
                         update_log(&task_id, "📝 Change detected, waiting 2s...", &state_handle);
-                        debounce = Some(tokio::time::Instant::now() + Duration::from_secs(2));
+                        // Start the 2-second timer
+                        debounce_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(2));
                     }
                 }
-            }
 
-            if let Some(time) = debounce {
-                if tokio::time::Instant::now() >= time {
-                    debounce = None; // Reset
+                // 3. Timeout / Timer Expiry
+                _ = tokio::time::sleep(timeout), if debounce_deadline.is_some() => {
+                    // Time is up! Run the sync.
+                    debounce_deadline = None; // Reset timer
                     retry_run_rsync(&task, &state_handle).await;
                 }
             }
-            
-            // Tiny sleep to prevent tight loop burning CPU
-            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     });
 

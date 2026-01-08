@@ -656,9 +656,11 @@ fn handle_remote_mkdir_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult
                         }
                     }
                     ServerResponse::Error(e) => {
-                        // Show error log (or you could add an ErrorPopup mode)
-                        eprintln!("Failed to create directory: {}", e);
-                        app.mode = AppMode::RemoteBrowser;
+                        // INSTEAD OF: eprintln!("Failed to create directory: {}", e);
+                        // DO THIS: Show the error in the input field so the user sees it
+                        app.input_new_dir = format!("Error: {}", e);
+                        // Optional: Force a redraw or keep mode to let user read it
+                        // app.mode stays AppMode::CreateRemoteDir
                     }
                     _ => { app.mode = AppMode::RemoteBrowser; }
                 }
