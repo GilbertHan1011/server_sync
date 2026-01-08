@@ -36,6 +36,7 @@ pub enum ClientRequest {
     StartTask(SyncTask),             // "Start syncing this new pair"
     StopTask(String),                // "Stop task with ID 'X'"
     DryRun(String),                  // "Show what would change for task X (dry run)"
+    CreateRemoteDir(String,Option<u16>,String,Option<String>), // "Create a directory on remote server at path X?" (host, port, path, password)
 }
 
 /// Responses the Server sends back

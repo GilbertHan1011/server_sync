@@ -10,6 +10,7 @@ pub enum AppMode {
     HostSelect,
     PasswordInput,    // Enter SSH password (optional)
     SyncModeSelect,   // Select sync mode (Mirror, AddOnly, SafeSync, Update)
+    CreateRemoteDir,  // Create a remote directory
     RemoteBrowser,    // Browse remote directories (destination selection)
     DryRunView,       // Display dry run results
 }
@@ -17,10 +18,12 @@ pub enum AppMode {
 pub struct App {
     pub mode: AppMode,
     pub tasks: Vec<SyncTask>,
+    pub dashboard_selected_idx : usize,
     // Browser State
     pub current_path: String,
     pub dir_entries: Vec<String>,
     pub selected_idx: usize,
+
     // Task Creation State
     pub pending_source: String,        // Selected local path before remote browsing
     pub remote_current_path: String,   // Current path in remote browser
@@ -46,4 +49,5 @@ pub struct App {
     pub saved_hosts: Vec<String>,
     pub host_list_idx: usize,
     pub is_editing_host: bool,
+    pub input_new_dir: String,
 }

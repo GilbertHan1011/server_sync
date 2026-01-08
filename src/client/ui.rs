@@ -49,11 +49,12 @@ pub fn draw(f: &mut Frame, app: &App) {
         AppMode::SyncModeSelect => draw_sync_mode_select(f, app, size),
         AppMode::DryRunView => draw_dry_run_view(f, app, size),
         AppMode::HostSelect => draw_host_select(f, app, size),
+        AppMode::CreateRemoteDir => draw_remote_mkdir_input(f, app, size),
     }
 }
 
 fn draw_dashboard(f: &mut Frame, app: &App, list_area: Rect, help_area: Rect) {
-    let items: Vec<ListItem> = app.tasks.iter().map(|t| {
+    let items: Vec<ListItem> = app.tasks.iter().enumerate().map(|(i,t)| {
         let color = match t.status.as_str() {
             "IDLE" => Color::Green,
             "ERROR" => Color::Red,
@@ -70,12 +71,17 @@ fn draw_dashboard(f: &mut Frame, app: &App, list_area: Rect, help_area: Rect) {
             SyncMode::Update => "Update",
         };
         let compress_flag = if t.compress { "+Z" } else { "" };
+        let style = if i == app.dashboard_selected_idx {
+            Style::default().fg(color).bg(Color::DarkGray) // Highlight background
+        } else {
+            Style::default().fg(color)
+        };
         
         ListItem::new(format!(
             "ID: {} | {} -> {}\n   [{}] Mode: {}{} | {}",
             t.id, t.source, remote_display, t.status, mode_name, compress_flag, t.last_log
         ))
-        .style(Style::default().fg(color))
+        .style(style)
     })
     .collect();
 
@@ -384,4 +390,20 @@ fn draw_dry_run_view(f: &mut Frame, app: &App, size: Rect) {
     let help = Paragraph::new("[Esc] Close  [↑↓] Scroll")
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(help, dry_chunks[1]);
+}
+
+fn draw_remote_mkdir_input(f: &mut Frame, app: &App, size: Rect) {
+    let area = centered_rect(60, 20, size); // Small popup
+    f.render_widget(Clear, area);
+    
+    let input_block = Paragraph::new(format!(
+        "New Directory Name:\n\n{}|", 
+        app.input_new_dir
+    ))
+    .block(Block::default()
+        .title("Create Remote Directory")
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Yellow))); // Yellow border to stand out
+        
+    f.render_widget(input_block, area);
 }

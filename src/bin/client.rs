@@ -78,6 +78,7 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
     let mut app = App {
         mode: AppMode::Dashboard,
         tasks: vec![],
+        dashboard_selected_idx: 0,
         current_path: start_path,
         dir_entries: vec![],
         selected_idx: 0,
@@ -100,6 +101,7 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
         saved_hosts: load_hosts(),
         host_list_idx: 0,
         is_editing_host: false,
+        input_new_dir: String::new(),
     };
 
 

@@ -51,6 +51,12 @@ pub async fn handle_request(
             let path = get_remote_home_ssh(&host, port, &password).await;
             ServerResponse::RemoteHome(path)
         }
+        ClientRequest::CreateRemoteDir(host, port, path, password) => {
+            match crate::server::ssh::create_remote_dir_ssh(&host, port, &path, &password).await {
+                Ok(_) => ServerResponse::Ack,
+                Err(e) => ServerResponse::Error(format!("Mkdir failed: {}", e)),
+            }
+        }
         ClientRequest::StartTask(task) => {
             // SECURITY: Validate host before starting task
             if !is_valid_host(&task.remote_host) {

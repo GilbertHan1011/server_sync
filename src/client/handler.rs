@@ -22,12 +22,25 @@ pub fn handle_key_event(key: KeyEvent, app: &mut App) -> HandlerResult {
         AppMode::SyncModeSelect => handle_sync_mode_select_keys(key, app),
         AppMode::RemoteBrowser => handle_remote_browser_keys(key, app),
         AppMode::DryRunView => handle_dry_run_view_keys(key, app),
+        AppMode::CreateRemoteDir => handle_remote_mkdir_input_keys(key, app),
     }
 }
 
 fn handle_dashboard_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
     match key.code {
         KeyCode::Char('q') | KeyCode::Char('Q') => HandlerResult::Quit,
+        KeyCode::Down => {
+            if app.dashboard_selected_idx < app.tasks.len().saturating_sub(1) {
+                app.dashboard_selected_idx += 1;
+            }
+            HandlerResult::Continue
+        }
+        KeyCode::Up => {
+            if app.dashboard_selected_idx > 0 {
+                app.dashboard_selected_idx -= 1;
+            }
+            HandlerResult::Continue
+        }
         KeyCode::Char('a') | KeyCode::Char('A') => {
             // Enter LocalBrowser Mode
             app.mode = AppMode::LocalBrowser;
@@ -46,26 +59,45 @@ fn handle_dashboard_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
             HandlerResult::Continue
         }
         KeyCode::Char('d') | KeyCode::Char('D') => {
-            // Delete first task
-            if let Some(t) = app.tasks.first() {
-                send_req(ClientRequest::StopTask(t.id.clone()));
+            if !app.tasks.is_empty() {
+                // Safety check for bounds
+                if app.dashboard_selected_idx >= app.tasks.len() {
+                    app.dashboard_selected_idx = app.tasks.len().saturating_sub(1);
+                }
+                
+                // Delete the SELECTED task
+                if let Some(t) = app.tasks.get(app.dashboard_selected_idx) {
+                    send_req(ClientRequest::StopTask(t.id.clone()));
+                }
+                
+                // Adjust selection if we deleted the last item
+                if app.dashboard_selected_idx > 0 && app.dashboard_selected_idx >= app.tasks.len().saturating_sub(1) {
+                     app.dashboard_selected_idx -= 1;
+                }
             }
             HandlerResult::Continue
         }
         KeyCode::Char('r') | KeyCode::Char('R') => {
-            // Dry run first task
-            if let Some(first_task) = app.tasks.first() {
-                match send_req(ClientRequest::DryRun(first_task.id.clone())) {
-                    ServerResponse::DryRunResult(changes) => {
-                        app.dry_run_results = changes;
-                        app.dry_run_task_id = first_task.id.clone();
-                        app.dry_run_scroll = 0;
-                        app.mode = AppMode::DryRunView;
+            if !app.tasks.is_empty() {
+                // Safety check
+                if app.dashboard_selected_idx >= app.tasks.len() {
+                    app.dashboard_selected_idx = app.tasks.len().saturating_sub(1);
+                }
+
+                // Dry Run the SELECTED task
+                if let Some(target_task) = app.tasks.get(app.dashboard_selected_idx) {
+                    match send_req(ClientRequest::DryRun(target_task.id.clone())) {
+                        ServerResponse::DryRunResult(changes) => {
+                            app.dry_run_results = changes;
+                            app.dry_run_task_id = target_task.id.clone();
+                            app.dry_run_scroll = 0;
+                            app.mode = AppMode::DryRunView;
+                        }
+                        ServerResponse::Error(e) => {
+                            eprintln!("Dry run error: {}", e);
+                        }
+                        _ => {}
                     }
-                    ServerResponse::Error(e) => {
-                        eprintln!("Dry run error: {}", e);
-                    }
-                    _ => {}
                 }
             }
             HandlerResult::Continue
@@ -465,6 +497,11 @@ fn handle_remote_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
             }
             HandlerResult::Continue
         }
+        KeyCode::Char('n') | KeyCode::Char('N') => {
+            app.mode = AppMode::CreateRemoteDir;
+            app.input_new_dir.clear();
+            HandlerResult::Continue
+        }
         KeyCode::Enter => {
             let selected = &app.dir_entries[app.selected_idx];
             let new_path = if selected == ".." {
@@ -488,7 +525,7 @@ fn handle_remote_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                 }
             };
             
-            app.remote_current_path = new_path;
+            app.remote_current_path = new_path.replace("//", "/");
             
             match send_req(ClientRequest::ListRemoteDirs(
                 app.pending_remote_host.clone(),
@@ -509,6 +546,18 @@ fn handle_remote_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
             HandlerResult::Continue
         }
         KeyCode::Char(' ') => {
+            let selected_item = &app.dir_entries[app.selected_idx];
+            let final_path = if selected_item == ".." {
+                app.remote_current_path.clone()
+            } else {
+                if app.remote_current_path == "/" {
+                    format!("/{}", selected_item)
+                } else {
+                    format!("{}/{}", app.remote_current_path, selected_item)
+                }
+            };
+            let final_path = final_path.replace("//", "/");
+            
             let task_id = format!("task_{}", app.tasks.len() + 1);
             
             let new_task = SyncTask {
@@ -516,7 +565,7 @@ fn handle_remote_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                 source: app.pending_source.clone(),
                 remote_host: app.pending_remote_host.clone(),
                 remote_port: app.pending_remote_port,
-                remote_path: app.remote_current_path.clone(),
+                remote_path: final_path,
                 status: "STARTING".to_string(),
                 last_log: "Created".to_string(),
                 poll_interval: 5,
@@ -564,3 +613,68 @@ fn handle_dry_run_view_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
     }
 }
 
+fn handle_remote_mkdir_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
+    match key.code {
+        KeyCode::Esc => {
+            app.mode = AppMode::RemoteBrowser; // Cancel
+            HandlerResult::Continue
+        }
+        KeyCode::Enter => {
+            if !app.input_new_dir.trim().is_empty() {
+                // Construct path: current_path/new_dir_name
+                let new_path = if app.remote_current_path == "/" {
+                    format!("/{}", app.input_new_dir.trim())
+                } else {
+                    format!("{}/{}", app.remote_current_path, app.input_new_dir.trim())
+                };
+
+                // Send Create Request
+                match send_req(ClientRequest::CreateRemoteDir(
+                    app.pending_remote_host.clone(),
+                    app.pending_remote_port,
+                    new_path,
+                    app.pending_password.clone()
+                )) {
+                    ServerResponse::Ack => {
+                        // Success: Go back to browser
+                        app.mode = AppMode::RemoteBrowser;
+                        
+                        // REFRESH the list immediately so we see the new folder
+                        match send_req(ClientRequest::ListRemoteDirs(
+                            app.pending_remote_host.clone(),
+                            app.pending_remote_port,
+                            app.remote_current_path.clone(),
+                            app.pending_password.clone()
+                        )) {
+                            ServerResponse::DirList(d) => {
+                                app.dir_entries = d;
+                                app.dir_entries.insert(0, "..".to_string());
+                                // Optional: Move selection to the new folder? 
+                                // For now, just reset or keep 0
+                            }
+                            _ => {}
+                        }
+                    }
+                    ServerResponse::Error(e) => {
+                        // Show error log (or you could add an ErrorPopup mode)
+                        eprintln!("Failed to create directory: {}", e);
+                        app.mode = AppMode::RemoteBrowser;
+                    }
+                    _ => { app.mode = AppMode::RemoteBrowser; }
+                }
+            } else {
+                app.mode = AppMode::RemoteBrowser; // Empty name = cancel
+            }
+            HandlerResult::Continue
+        }
+        KeyCode::Backspace => {
+            app.input_new_dir.pop();
+            HandlerResult::Continue
+        }
+        KeyCode::Char(c) => {
+            app.input_new_dir.push(c);
+            HandlerResult::Continue
+        }
+        _ => HandlerResult::Continue,
+    }
+}

@@ -115,3 +115,48 @@ pub fn setup_askpass_script() -> std::io::Result<String> {
         
         Ok(script_path)
     }
+
+    pub async fn create_remote_dir_ssh(
+        remote_host: &str,
+        port: Option<u16>,
+        path: &str,
+        password: &Option<String>,
+    ) -> Result<(), String> {
+        if !crate::common::utils::is_valid_host(remote_host) {
+            return Err("Invalid remote host format".to_string());
+        }
+    
+        let mut cmd = tokio::process::Command::new("ssh");
+        
+        // Inject ASKPASS logic (Reuse your existing setup_askpass_script logic)
+        if let Some(pass) = password {
+            if let Ok(script_path) = setup_askpass_script() {
+                cmd.env("SSH_ASKPASS", &script_path);
+                cmd.env("SSH_ASKPASS_REQUIRE", "force");
+                cmd.env("SERVER_SYNC_PW", pass);
+                cmd.env("DISPLAY", ":0");
+            }
+        }
+    
+        let p = port.unwrap_or(22).to_string();
+    
+        let output = cmd
+            .arg("-p").arg(&p)
+            .arg("-T")
+            .arg("-c").arg("aes128-gcm@openssh.com")
+            .arg("-o").arg("StrictHostKeyChecking=no")
+            .arg("-o").arg("ControlMaster=auto")
+            .arg("-o").arg("ControlPath=~/.ssh/sockets/%r@%h-%p")
+            .arg("-o").arg("ControlPersist=600")
+            .arg(remote_host)
+            .arg(format!("mkdir -p \"{}\"", path)) // <--- The Command
+            .output()
+            .await
+            .map_err(|e| e.to_string())?;
+    
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&output.stderr).to_string())
+        }
+    }
