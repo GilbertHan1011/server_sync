@@ -23,6 +23,7 @@ pub fn handle_key_event(key: KeyEvent, app: &mut App) -> HandlerResult {
         AppMode::RemoteBrowser => handle_remote_browser_keys(key, app),
         AppMode::DryRunView => handle_dry_run_view_keys(key, app),
         AppMode::CreateRemoteDir => handle_remote_mkdir_input_keys(key, app),
+        AppMode::LogView => handle_log_view_keys(key, app),
     }
 }
 
@@ -118,6 +119,35 @@ fn handle_dashboard_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                         }
                         ServerResponse::Error(e) => {
                             eprintln!("Failed to restart: {}", e);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            HandlerResult::Continue
+        }
+        KeyCode::Char('l') | KeyCode::Char('L') => {
+            if !app.tasks.is_empty() {
+                // Safety clamp
+                if app.dashboard_selected_idx >= app.tasks.len() {
+                    app.dashboard_selected_idx = app.tasks.len().saturating_sub(1);
+                }
+                
+                if let Some(t) = app.tasks.get(app.dashboard_selected_idx) {
+                    let tid = t.id.clone();
+                    match send_req(ClientRequest::GetTaskLog(tid.clone())) {
+                        ServerResponse::TaskLog(_, content) => {
+                            app.view_task_log = content;
+                            app.view_log_task_id = tid.clone();
+                            app.view_log_scroll = 0;
+                            app.view_log_last_fetch = std::time::Instant::now();
+                            app.mode = AppMode::LogView;
+                            
+                            // Auto-scroll to bottom (simple heuristic: huge number)
+                            let lines = app.view_task_log.lines().count();
+                            if lines > 20 {
+                                app.view_log_scroll = lines.saturating_sub(20);
+                            }
                         }
                         _ => {}
                     }
@@ -629,6 +659,44 @@ fn handle_dry_run_view_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
         KeyCode::Up => {
             if app.dry_run_scroll > 0 {
                 app.dry_run_scroll -= 1;
+            }
+            HandlerResult::Continue
+        }
+        _ => HandlerResult::Continue,
+    }
+}
+
+fn handle_log_view_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
+            app.mode = AppMode::Dashboard;
+            HandlerResult::Continue
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.view_log_scroll = app.view_log_scroll.saturating_add(1);
+            HandlerResult::Continue
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.view_log_scroll = app.view_log_scroll.saturating_sub(1);
+            HandlerResult::Continue
+        }
+        KeyCode::PageDown => {
+            app.view_log_scroll = app.view_log_scroll.saturating_add(10);
+            HandlerResult::Continue
+        }
+        KeyCode::PageUp => {
+            app.view_log_scroll = app.view_log_scroll.saturating_sub(10);
+            HandlerResult::Continue
+        }
+        KeyCode::Char('r') | KeyCode::Char('R') => {
+            // Manual refresh
+            let tid = app.view_log_task_id.clone();
+            match send_req(ClientRequest::GetTaskLog(tid.clone())) {
+                ServerResponse::TaskLog(_, content) => {
+                    app.view_task_log = content;
+                    app.view_log_last_fetch = std::time::Instant::now();
+                }
+                _ => {}
             }
             HandlerResult::Continue
         }

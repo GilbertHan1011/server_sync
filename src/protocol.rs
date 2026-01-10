@@ -38,6 +38,7 @@ pub enum ClientRequest {
     RestartTask(String),
     DryRun(String),                  // "Show what would change for task X (dry run)"
     CreateRemoteDir(String,Option<u16>,String,Option<String>), // "Create a directory on remote server at path X?" (host, port, path, password)
+    GetTaskLog(String),              // "Request log for task_id"
 }
 
 /// Responses the Server sends back
@@ -49,4 +50,5 @@ pub enum ServerResponse {
     Ack,                             // "Okay, done"
     Error(String),
     DryRunResult(Vec<String>),       // List of file changes from dry run
+    TaskLog(String, String),        // (task_id, log_content)
 }

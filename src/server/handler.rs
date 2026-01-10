@@ -3,7 +3,7 @@ use tokio::fs as tokio_fs;
 use crate::protocol::{ClientRequest, ServerResponse, SyncTask};
 use crate::server::state::ServerState;
 use crate::server::ssh::{list_remote_dirs_ssh, get_remote_home_ssh};
-use crate::server::worker::{self, spawn_sync_worker, run_dry_run};
+use crate::server::worker::{self, spawn_sync_worker, run_dry_run, get_task_log_path};
 use crate::server::state::save_tasks;
 use crate::common::utils::is_valid_host;
 
@@ -151,6 +151,13 @@ pub async fn handle_request(
                 ServerResponse::DryRunResult(changes)
             } else {
                 ServerResponse::Error(format!("Task {} not found", task_id))
+            }
+        }
+        ClientRequest::GetTaskLog(id) => {
+            let path = get_task_log_path(&id);
+            match tokio_fs::read_to_string(&path).await {
+                Ok(content) => ServerResponse::TaskLog(id, content),
+                Err(_) => ServerResponse::TaskLog(id, "No logs found yet.".to_string()),
             }
         }
     }

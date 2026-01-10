@@ -13,6 +13,7 @@ pub enum AppMode {
     CreateRemoteDir,  // Create a remote directory
     RemoteBrowser,    // Browse remote directories (destination selection)
     DryRunView,       // Display dry run results
+    LogView,          // Display task logs
 }
 
 pub struct App {
@@ -45,6 +46,11 @@ pub struct App {
     pub dry_run_results: Vec<String>,  // Results from dry run
     pub dry_run_task_id: String,       // Which task was dry-run
     pub dry_run_scroll: usize,         // Scroll position in dry run view
+    // Log Viewer State
+    pub view_task_log: String,         // Content of the log
+    pub view_log_scroll: usize,        // Scroll position
+    pub view_log_task_id: String,      // Which task's log is being viewed
+    pub view_log_last_fetch: std::time::Instant, // For auto-refresh timing
     // Saved Host Names
     pub saved_hosts: Vec<String>,
     pub host_list_idx: usize,

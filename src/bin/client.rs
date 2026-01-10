@@ -98,6 +98,10 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
         dry_run_results: vec![],
         dry_run_task_id: String::new(),
         dry_run_scroll: 0,
+        view_task_log: String::new(),
+        view_log_scroll: 0,
+        view_log_task_id: String::new(),
+        view_log_last_fetch: std::time::Instant::now(),
         saved_hosts: load_hosts(),
         host_list_idx: 0,
         is_editing_host: false,
@@ -124,6 +128,22 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
                     }
                 }
                 _ => {}
+            }
+        }
+
+        // Auto-refresh logs when in LogView mode
+        if matches!(app.mode, AppMode::LogView) {
+            let now = std::time::Instant::now();
+            if now.duration_since(app.view_log_last_fetch).as_secs() >= 2 {
+                let tid = app.view_log_task_id.clone();
+                match send_req(ClientRequest::GetTaskLog(tid.clone())) {
+                    ServerResponse::TaskLog(_, content) => {
+                        app.view_task_log = content;
+                        app.view_log_last_fetch = now;
+                        // Maintain scroll position (don't reset to bottom on auto-refresh)
+                    }
+                    _ => {}
+                }
             }
         }
 

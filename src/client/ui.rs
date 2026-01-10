@@ -50,6 +50,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         AppMode::DryRunView => draw_dry_run_view(f, app, size),
         AppMode::HostSelect => draw_host_select(f, app, size),
         AppMode::CreateRemoteDir => draw_remote_mkdir_input(f, app, size),
+        AppMode::LogView => draw_log_view(f, app, size),
     }
 }
 
@@ -90,7 +91,7 @@ fn draw_dashboard(f: &mut Frame, app: &App, list_area: Rect, help_area: Rect) {
     f.render_widget(list, list_area);
 
     let help = Paragraph::new(
-        "Controls:\n[A] Add New Task \n[D] Delete Task \n[R] Dry Run \n [S] Restart Task \n [Q] Quit"
+        "Controls:\n[A] Add New Task \n[D] Delete Task \n[R] Dry Run \n[S] Restart Task \n[L] View Logs \n[Q] Quit"
     )
     .block(Block::default().borders(Borders::ALL));
     f.render_widget(help, help_area);
@@ -406,4 +407,27 @@ fn draw_remote_mkdir_input(f: &mut Frame, app: &App, size: Rect) {
         .style(Style::default().fg(Color::Yellow))); // Yellow border to stand out
         
     f.render_widget(input_block, area);
+}
+
+fn draw_log_view(f: &mut Frame, app: &App, size: Rect) {
+    let area = centered_rect(90, 80, size);
+    f.render_widget(Clear, area);
+    
+    let log_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(10), Constraint::Length(3)])
+        .split(area);
+    
+    let title = format!("Logs: {}", app.view_log_task_id);
+    let p = Paragraph::new(app.view_task_log.as_str())
+        .block(Block::default()
+            .title(title.as_str())
+            .borders(Borders::ALL))
+        .scroll((app.view_log_scroll as u16, 0));
+    
+    f.render_widget(p, log_chunks[0]);
+    
+    let help = Paragraph::new("[Esc] Back  [↑↓] Scroll  [R] Refresh")
+        .block(Block::default().borders(Borders::ALL));
+    f.render_widget(help, log_chunks[1]);
 }

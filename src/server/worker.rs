@@ -2,14 +2,54 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use regex::Regex;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use notify::{Config, PollWatcher, RecursiveMode, Watcher};
+use chrono::Local;
 use crate::protocol::{SyncTask, SyncMode};
 use crate::common::utils::is_valid_host;
 use crate::server::state::{ServerState, update_status, update_log};
 use crate::server::ssh::setup_askpass_script;
+
+// --- LOG UTILITIES ---
+pub fn get_task_log_path(task_id: &str) -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    format!("{}/.sync_daemon_logs/{}.log", home, task_id)
+}
+
+async fn ensure_log_dir() -> std::io::Result<()> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let log_dir = format!("{}/.sync_daemon_logs", home);
+    tokio::fs::create_dir_all(&log_dir).await
+}
+
+async fn rotate_log_if_needed(log_path: &str) -> std::io::Result<()> {
+    const MAX_SIZE: u64 = 10 * 1024 * 1024; // 10MB
+    
+    if let Ok(metadata) = tokio::fs::metadata(log_path).await {
+        if metadata.len() > MAX_SIZE {
+            let old_path = format!("{}.old", log_path);
+            // Overwrite old file if it exists
+            let _ = tokio::fs::rename(log_path, &old_path).await;
+        }
+    }
+    Ok(())
+}
+
+async fn write_log_line(log_path: &str, prefix: &str, line: &str) {
+    let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
+    let log_line = format!("[{}] {}: {}\n", timestamp, prefix, line);
+    
+    if let Ok(mut file) = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .await
+    {
+        let _ = file.write_all(log_line.as_bytes()).await;
+    }
+}
 
 // --- SYNC WORKER ---
 // Spawns a dedicated thread for a single folder
@@ -194,10 +234,18 @@ pub async fn run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
         return;
     }
 
+    // Setup logging
+    let log_path = get_task_log_path(&task.id);
+    let _ = ensure_log_dir().await;
+    let _ = rotate_log_if_needed(&log_path).await;
+    
+    let full_remote = format!("{}:{}", task.remote_host, task.remote_path);
+    let sync_start_msg = format!("--- Starting Sync: {} -> {} ---", task.source, full_remote);
+    write_log_line(&log_path, "SYNC", &sync_start_msg).await;
+
     update_status(&task.id, "SYNCING 0%", state);
     update_log(&task.id, "🔄 Starting sync...", state);
 
-    let full_remote = format!("{}:{}", task.remote_host, task.remote_path);
     let port = task.remote_port.unwrap_or(22);
     
     let mut cmd = Command::new("rsync"); // Now tokio::process::Command
@@ -275,7 +323,10 @@ pub async fn run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
 
     match cmd.spawn() {
         Ok(mut child) => {
-            // ASYNC PROGRESS READING
+            let log_path_stdout = log_path.clone();
+            let log_path_stderr = log_path.clone();
+            
+            // ASYNC STDOUT READING
             if let Some(stdout) = child.stdout.take() {
                 let task_id = task.id.clone();
                 let state_clone = state.clone();
@@ -284,6 +335,10 @@ pub async fn run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
                 tokio::spawn(async move {
                     let mut reader = BufReader::new(stdout).lines();
                     while let Ok(Some(line)) = reader.next_line().await {
+                        // Write to log file
+                        write_log_line(&log_path_stdout, "STDOUT", &line).await;
+                        
+                        // Parse progress for status updates
                         if let Some(percent) = parse_rsync_percentage(&line) {
                             update_status(&task_id, &format!("SYNCING {}%", percent), &state_clone);
                         }
@@ -291,23 +346,41 @@ pub async fn run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
                 });
             }
 
+            // ASYNC STDERR READING
+            if let Some(stderr) = child.stderr.take() {
+                tokio::spawn(async move {
+                    let mut reader = BufReader::new(stderr).lines();
+                    while let Ok(Some(line)) = reader.next_line().await {
+                        write_log_line(&log_path_stderr, "STDERR", &line).await;
+                    }
+                });
+            }
+
             // NON-BLOCKING WAIT
             match child.wait().await { // <--- The magic .await
-                Ok(status) if status.success() => {
-                    update_log(&task.id, "✅ Sync Successful", state);
-                    update_status(&task.id, "IDLE", state);
-                }
                 Ok(status) => {
-                    update_log(&task.id, &format!("❌ Failed (Exit {})", status), state);
-                    update_status(&task.id, "ERROR", state);
+                    let status_msg = format!("Process finished with: {}", status);
+                    write_log_line(&log_path, "SYNC", &status_msg).await;
+                    
+                    if status.success() {
+                        update_log(&task.id, "✅ Sync Successful", state);
+                        update_status(&task.id, "IDLE", state);
+                    } else {
+                        update_log(&task.id, &format!("❌ Failed (Exit {})", status), state);
+                        update_status(&task.id, "ERROR", state);
+                    }
                 }
                 Err(e) => {
+                    let error_msg = format!("Wait error: {}", e);
+                    write_log_line(&log_path, "SYNC", &error_msg).await;
                     update_log(&task.id, &format!("❌ Process Error: {}", e), state);
                     update_status(&task.id, "ERROR", state);
                 }
             }
         }
         Err(e) => {
+            let error_msg = format!("Exec Failed: {}", e);
+            write_log_line(&log_path, "SYNC", &error_msg).await;
             update_log(&task.id, &format!("❌ Exec Error: {}", e), state);
             update_status(&task.id, "ERROR", state);
         }
