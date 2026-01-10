@@ -3,9 +3,10 @@ use tokio::fs as tokio_fs;
 use crate::protocol::{ClientRequest, ServerResponse, SyncTask};
 use crate::server::state::ServerState;
 use crate::server::ssh::{list_remote_dirs_ssh, get_remote_home_ssh};
-use crate::server::worker::{spawn_sync_worker, run_dry_run};
+use crate::server::worker::{self, spawn_sync_worker, run_dry_run};
 use crate::server::state::save_tasks;
 use crate::common::utils::is_valid_host;
+
 
 pub async fn handle_request(
     req: ClientRequest,
@@ -82,6 +83,38 @@ pub async fn handle_request(
                 } else {
                     ServerResponse::Error(format!("Task {} already exists", task_id))
                 }
+            }
+        }
+        ClientRequest::RestartTask(id) => {
+            // 1. Identify task and remove old stopper (Scope the lock to drop it quickly)
+            let (task_data, old_stopper) = {
+                let mut s: std::sync::MutexGuard<'_, ServerState> = state.lock().unwrap();
+                let task = s.tasks.get(&id).cloned();
+                let stopper = s.stoppers.remove(&id);
+                (task, stopper)
+            };
+
+            if let Some(task) = task_data {
+                // 2. Kill the old worker (Async - wait for it to die)
+                if let Some(tx) = old_stopper {
+                    let _ = tx.send(()).await;
+                }
+
+                // 3. Spawn a new worker
+                let new_stopper = worker::spawn_sync_worker(task.clone(), state.clone());
+
+                // 4. Re-acquire lock to store new stopper and update status
+                let mut s = state.lock().unwrap();
+                s.stoppers.insert(id.clone(), new_stopper);
+
+                // Optional: Update status text immediately so user sees feedback
+                if let Some(t) = s.tasks.get_mut(&id) {
+                    t.status = "RESTARTING...".to_string();
+                }
+
+                ServerResponse::Ack
+            } else {
+                ServerResponse::Error(format!("Task {} not found", id))
             }
         }
         ClientRequest::StopTask(id) => {

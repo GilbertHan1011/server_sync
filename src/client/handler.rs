@@ -102,6 +102,29 @@ fn handle_dashboard_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
             }
             HandlerResult::Continue
         }
+        KeyCode::Char('s') | KeyCode::Char('S') => {
+            if !app.tasks.is_empty() {
+                // Safety check for index
+                if app.dashboard_selected_idx >= app.tasks.len() {
+                    app.dashboard_selected_idx = app.tasks.len().saturating_sub(1);
+                }
+
+                if let Some(target_task) = app.tasks.get(app.dashboard_selected_idx) {
+                    // Send Restart Request
+                    match send_req(ClientRequest::RestartTask(target_task.id.clone())) {
+                        ServerResponse::Ack => {
+                            // Optional: Force an immediate refresh of list to see "RESTARTING"
+                            // You can call ListTasks logic here or just wait for next tick
+                        }
+                        ServerResponse::Error(e) => {
+                            eprintln!("Failed to restart: {}", e);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            HandlerResult::Continue
+        }
         _ => HandlerResult::Continue,
     }
 }

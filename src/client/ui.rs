@@ -90,7 +90,7 @@ fn draw_dashboard(f: &mut Frame, app: &App, list_area: Rect, help_area: Rect) {
     f.render_widget(list, list_area);
 
     let help = Paragraph::new(
-        "Controls:\n[A] Add New Task (4-step wizard)\n[D] Delete Task (First ID)\n[R] Dry Run (First Task)\n[Q] Quit"
+        "Controls:\n[A] Add New Task \n[D] Delete Task \n[R] Dry Run \n [S] Restart Task \n [Q] Quit"
     )
     .block(Block::default().borders(Borders::ALL));
     f.render_widget(help, help_area);

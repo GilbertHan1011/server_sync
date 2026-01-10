@@ -35,6 +35,7 @@ pub enum ClientRequest {
     GetRemoteHome(String, Option<u16>, Option<String>), // "What is the home directory on remote server?" (host, port, password)
     StartTask(SyncTask),             // "Start syncing this new pair"
     StopTask(String),                // "Stop task with ID 'X'"
+    RestartTask(String),
     DryRun(String),                  // "Show what would change for task X (dry run)"
     CreateRemoteDir(String,Option<u16>,String,Option<String>), // "Create a directory on remote server at path X?" (host, port, path, password)
 }
