@@ -178,44 +178,52 @@ fn handle_local_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
             HandlerResult::Continue
         }
         KeyCode::Enter => {
-            // Navigate into directory
+            // Navigate into directory (only if it's ".." or ends with "/")
             let selected = &app.dir_entries[app.selected_idx];
-            let new_path = if selected == ".." {
-                Path::new(&app.current_path)
+            
+            if selected == ".." {
+                let new_path = Path::new(&app.current_path)
                     .parent()
                     .unwrap_or(Path::new("/"))
                     .display()
-                    .to_string()
-            } else {
-                format!("{}/{}", app.current_path, selected)
-            };
+                    .to_string();
+                app.current_path = new_path.replace("//", "/");
+                request_local_list(app);
+            } else if selected.ends_with('/') {
+                // It's a directory! Enter it.
+                // Remove the trailing slash for the path construction
+                let clean_name = selected.trim_end_matches('/');
+                
+                let new_path = if app.current_path == "/" {
+                    format!("/{}", clean_name)
+                } else {
+                    format!("{}/{}", app.current_path, clean_name)
+                };
 
-            app.current_path = new_path.replace("//", "/");
-            match send_req(ClientRequest::ListLocalDirs(app.current_path.clone())) {
-                ServerResponse::DirList(d) => {
-                    app.dir_entries = d;
-                    app.dir_entries.insert(0, "..".to_string());
-                    app.selected_idx = 0;
-                }
-                ServerResponse::Error(e) => {
-                    eprintln!("Error navigating: {}", e);
-                }
-                _ => {}
+                app.current_path = new_path.replace("//", "/");
+                request_local_list(app);
             }
+            // If it's a file (no "/" suffix), do nothing
             HandlerResult::Continue
         }
         KeyCode::Char(' ') => {
+            // Select the file or folder as the source
             let selected_item = &app.dir_entries[app.selected_idx];
+            
             let final_path = if selected_item == ".." {
                 app.current_path.clone()
             } else {
+                // Strip slash if it's a directory so rsync treats it consistently
+                let clean_name = selected_item.trim_end_matches('/');
+                
                 if app.current_path == "/" {
-                    format!("/{}", selected_item)
+                    format!("/{}", clean_name)
                 } else {
-                    format!("{}/{}", app.current_path, selected_item)
+                    format!("{}/{}", app.current_path, clean_name)
                 }
             };
-            // STEP 1 COMPLETE: Source Selected
+
+            // STEP 1 COMPLETE: Source Selected (File OR Folder)
             app.pending_source = final_path;
             app.saved_hosts = load_hosts();
 
@@ -230,6 +238,21 @@ fn handle_local_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
             HandlerResult::Continue
         }
         _ => HandlerResult::Continue,
+    }
+}
+
+// Helper to reduce code duplication
+fn request_local_list(app: &mut App) {
+    match send_req(ClientRequest::ListLocalDirs(app.current_path.clone())) {
+        ServerResponse::DirList(d) => {
+            app.dir_entries = d;
+            app.dir_entries.insert(0, "..".to_string());
+            app.selected_idx = 0;
+        }
+        ServerResponse::Error(e) => {
+            eprintln!("Error: {}", e);
+        }
+        _ => {}
     }
 }
 

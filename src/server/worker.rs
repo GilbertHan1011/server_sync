@@ -211,7 +211,25 @@ pub async fn run_dry_run(task: &SyncTask) -> Vec<String> {
     }
     
     cmd.arg("--filter=:- .gitignore");
-    cmd.arg(format!("{}/", task.source));
+    
+    // Determine if source is a file or directory
+    let source_arg = match tokio::fs::metadata(&task.source).await {
+        Ok(metadata) => {
+            if metadata.is_file() {
+                // For files, don't append trailing slash
+                task.source.clone()
+            } else {
+                // For directories, append trailing slash to sync contents
+                format!("{}/", task.source)
+            }
+        }
+        Err(_) => {
+            // If metadata check fails, default to directory behavior (with slash)
+            // This maintains backward compatibility
+            format!("{}/", task.source)
+        }
+    };
+    cmd.arg(source_arg);
     cmd.arg(&full_remote);
     
     match cmd.output().await {
@@ -313,8 +331,24 @@ pub async fn run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
     // Respect .gitignore files
     cmd.arg("--filter=:- .gitignore");
     
-    // Paths
-    cmd.arg(format!("{}/", task.source));
+    // Paths - determine if source is a file or directory
+    let source_arg = match tokio::fs::metadata(&task.source).await {
+        Ok(metadata) => {
+            if metadata.is_file() {
+                // For files, don't append trailing slash
+                task.source.clone()
+            } else {
+                // For directories, append trailing slash to sync contents
+                format!("{}/", task.source)
+            }
+        }
+        Err(_) => {
+            // If metadata check fails, default to directory behavior (with slash)
+            // This maintains backward compatibility
+            format!("{}/", task.source)
+        }
+    };
+    cmd.arg(source_arg);
     cmd.arg(&full_remote);
     
     // Stream output for real-time progress

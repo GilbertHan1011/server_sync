@@ -19,7 +19,7 @@ pub async fn handle_request(
             ServerResponse::State(list)
         }
         ClientRequest::ListLocalDirs(path) => {
-            // BROWSER LOGIC: Read dir contents (ASYNC)
+            // BROWSER LOGIC: Read dir contents (ASYNC) - Now includes files and directories
             let p = if path.is_empty() {
                 "/".to_string()
             } else {
@@ -28,17 +28,37 @@ pub async fn handle_request(
 
             match tokio_fs::read_dir(&p).await {
                 Ok(mut entries) => {
-                    let mut dirs = Vec::new();
+                    let mut items = Vec::new();
                     while let Ok(Some(entry)) = entries.next_entry().await {
-                        if let Ok(metadata) = entry.metadata().await {
-                            if metadata.is_dir() {
-                                if let Ok(name) = entry.file_name().into_string() {
-                                    dirs.push(name);
+                        // Get file type (cheap, no extra syscall usually)
+                        if let Ok(ft) = entry.file_type().await {
+                            if let Ok(name) = entry.file_name().into_string() {
+                                // Filter out hidden files (starting with '.')
+                                if !name.starts_with('.') {
+                                    if ft.is_dir() {
+                                        // Append '/' to indicate directory
+                                        items.push(format!("{}/", name));
+                                    } else {
+                                        // Files stay as is
+                                        items.push(name);
+                                    }
                                 }
                             }
                         }
                     }
-                    ServerResponse::DirList(dirs)
+                    // Sort: Directories first, then files (both alphabetically)
+                    items.sort_by(|a, b| {
+                        let a_is_dir = a.ends_with('/');
+                        let b_is_dir = b.ends_with('/');
+                        if a_is_dir && !b_is_dir {
+                            std::cmp::Ordering::Less
+                        } else if !a_is_dir && b_is_dir {
+                            std::cmp::Ordering::Greater
+                        } else {
+                            a.cmp(b)
+                        }
+                    });
+                    ServerResponse::DirList(items)
                 }
                 Err(e) => ServerResponse::Error(format!("{}", e)),
             }
