@@ -1,4 +1,4 @@
-use crate::protocol::{SyncTask, SyncMode};
+use crate::protocol::{SyncTask, SyncMode, SyncDirection};
 
 // --- UI STATE ---
 #[derive(Debug, Clone, PartialEq)]
@@ -39,9 +39,11 @@ pub struct App {
     pub input_password: String,           // Buffer for typing password
     pub show_password: bool,              // Toggle to show/hide characters
     // Sync Mode Selection State
+    pub pending_sync_direction: SyncDirection,   // Selected sync direction
     pub pending_sync_mode: SyncMode,   // Selected sync mode
     pub pending_compress: bool,        // Compression enabled
     pub sync_mode_selected_idx: usize, // 0-3 for the 4 modes
+    pub sync_direction_selected_idx: usize, // 0-1 for the 2 directions
     // Dry Run State
     pub dry_run_results: Vec<String>,  // Results from dry run
     pub dry_run_task_id: String,       // Which task was dry-run

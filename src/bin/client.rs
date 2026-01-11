@@ -11,7 +11,7 @@ use ratatui::{
     backend::CrosstermBackend,
     Terminal,
 };
-use server_sync::protocol::{ClientRequest, ServerResponse, SyncMode};
+use server_sync::protocol::{ClientRequest, ServerResponse, SyncMode, SyncDirection};
 use server_sync::client::state::{App, AppMode};
 use server_sync::client::network::send_req;
 use server_sync::client::ui::draw;
@@ -93,6 +93,8 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
         input_password: String::new(),
         show_password: false,
         pending_sync_mode: SyncMode::Mirror,
+        pending_sync_direction: SyncDirection::Push,
+        sync_direction_selected_idx: 0,
         pending_compress: true,
         sync_mode_selected_idx: 0,
         dry_run_results: vec![],

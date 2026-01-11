@@ -5,7 +5,7 @@ use ratatui::{
     Frame,
 };
 use crate::client::state::{App, AppMode};
-use crate::protocol::SyncMode;
+use crate::protocol::{SyncMode, SyncDirection};
 
 pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
@@ -91,7 +91,7 @@ fn draw_dashboard(f: &mut Frame, app: &App, list_area: Rect, help_area: Rect) {
     f.render_widget(list, list_area);
 
     let help = Paragraph::new(
-        "Controls:\n[A] Add New Task \n[D] Delete Task \n[R] Dry Run \n[S] Restart Task \n[L] View Logs \n[Q] Quit"
+        "Controls:\n[A] Add Task [Push] \t [P] Add Task [Pull] \t [D] Delete Task \t [R] Dry Run \n[S] Restart Task \t[L] View Logs \t[Q] Quit"
     )
     .block(Block::default().borders(Borders::ALL));
     f.render_widget(help, help_area);
@@ -120,8 +120,17 @@ fn draw_local_browser(f: &mut Frame, app: &App, size: Rect) {
         })
         .collect();
 
-    let title = format!("Select Source Folder: {}", app.current_path);
-    let instructions_text = "[Enter] Enter Dir  [Space] Select as Source  [Esc] Cancel";
+    let (title_text, instructions_text) = match app.pending_sync_direction {
+        SyncDirection::Push => (
+            "Select Source Folder",
+            "[Enter] Enter Dir  [Space] Select as Source  [Esc] Cancel"
+        ),
+        SyncDirection::Pull => (
+            "Select Destination Folder",
+            "[Enter] Enter Dir  [Space] Select as Destination  [Esc] Back"
+        ),
+    };
+    let title = format!("{}: {}", title_text, app.current_path);
 
     let b_block = Block::default()
         .title(title)
@@ -156,8 +165,13 @@ fn draw_remote_browser(f: &mut Frame, app: &App, size: Rect) {
         })
         .collect();
 
+    let direction_text = match app.pending_sync_direction {
+        SyncDirection::Push => "Select Remote Destination",
+        SyncDirection::Pull => "Select Remote Source",
+    };
     let title = format!(
-        "Select Remote Destination: {} (Interface may freeze during SSH)", 
+        "{}: {} (Interface may freeze during SSH)", 
+        direction_text,
         if app.remote_current_path.is_empty() { 
             format!("{}:/", app.pending_remote_host) 
         } else { 
@@ -356,7 +370,7 @@ fn draw_sync_mode_select(f: &mut Frame, app: &App, size: Rect) {
     
     let mode_list = List::new(mode_items)
         .block(Block::default()
-            .title("Step 4: Select Sync Mode")
+            .title("Step 5: Select Sync Mode")
             .borders(Borders::ALL));
     f.render_widget(mode_list, sync_chunks[0]);
     

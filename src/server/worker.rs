@@ -7,7 +7,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use notify::{Config, PollWatcher, RecursiveMode, Watcher};
 use chrono::Local;
-use crate::protocol::{SyncTask, SyncMode};
+use crate::protocol::{SyncTask, SyncMode, SyncDirection};
 use crate::common::utils::is_valid_host;
 use crate::server::state::{ServerState, update_status, update_log};
 use crate::server::ssh::setup_askpass_script;
@@ -256,8 +256,32 @@ pub async fn run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
     let log_path = get_task_log_path(&task.id);
     let _ = ensure_log_dir().await;
     let _ = rotate_log_if_needed(&log_path).await;
+    let mut cmd = Command::new("rsync"); // Now tokio::process::Command
     
     let full_remote = format!("{}:{}", task.remote_host, task.remote_path);
+    let local_path = task.source.clone();
+    let source_arg = match tokio::fs::metadata(&task.source).await {
+        Ok(metadata) => {
+            if metadata.is_file() {
+                task.source.clone()
+            } else {
+                format!("{}/", task.source)
+            }
+        }
+    Err(_) => {
+        format!("{}/", task.source)
+        }
+    };
+    match task.sync_direction {
+        SyncDirection::Push => {
+            cmd.arg(&source_arg);
+            cmd.arg(&full_remote);
+        }
+        SyncDirection::Pull => {
+            cmd.arg(format!("{}/", full_remote)); // NOTE:We need to add a function to check whether remote is a file or not
+            cmd.arg(&local_path);
+        }
+    }
     let sync_start_msg = format!("--- Starting Sync: {} -> {} ---", task.source, full_remote);
     write_log_line(&log_path, "SYNC", &sync_start_msg).await;
 
@@ -266,7 +290,6 @@ pub async fn run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
 
     let port = task.remote_port.unwrap_or(22);
     
-    let mut cmd = Command::new("rsync"); // Now tokio::process::Command
     if let Some(pass) = &task.password {
         // 1. We assume the script is created. Since run_rsync is called often,
         // you might want to create it once in main(), or just overwrite it here.

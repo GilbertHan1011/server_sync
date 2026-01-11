@@ -3,7 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use crate::client::state::{App, AppMode};
 use crate::client::network::send_req;
 use crate::client::config::{load_hosts, save_hosts};
-use crate::protocol::{ClientRequest, ServerResponse, SyncMode, SyncTask};
+use crate::protocol::{ClientRequest, ServerResponse, SyncMode, SyncTask, SyncDirection};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum HandlerResult {
@@ -43,7 +43,9 @@ fn handle_dashboard_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
             HandlerResult::Continue
         }
         KeyCode::Char('a') | KeyCode::Char('A') => {
-            // Enter LocalBrowser Mode
+            // Set direction to Push and enter LocalBrowser Mode
+            app.pending_sync_direction = SyncDirection::Push;
+            app.sync_direction_selected_idx = 0;
             app.mode = AppMode::LocalBrowser;
             match send_req(ClientRequest::ListLocalDirs(app.current_path.clone())) {
                 ServerResponse::DirList(d) => {
@@ -56,6 +58,26 @@ fn handle_dashboard_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                     app.mode = AppMode::Dashboard;
                 }
                 _ => {}
+            }
+            HandlerResult::Continue
+        }
+        KeyCode::Char('p') | KeyCode::Char('P') => {
+            // Set direction to Pull and always show host selection
+            app.pending_sync_direction = SyncDirection::Pull;
+            app.sync_direction_selected_idx = 1;
+            app.saved_hosts = load_hosts();
+            
+            // Always allow user to select remote server
+            if app.saved_hosts.is_empty() {
+                // No saved hosts, go to host input
+                app.mode = AppMode::RemoteHostInput;
+                app.input_remote_host = String::new();
+                app.input_cursor_pos = 0;
+                app.is_editing_host = false;
+            } else {
+                // Have saved hosts, show selection screen
+                app.mode = AppMode::HostSelect;
+                app.host_list_idx = 0;
             }
             HandlerResult::Continue
         }
@@ -162,7 +184,21 @@ fn handle_dashboard_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
 fn handle_local_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
     match key.code {
         KeyCode::Esc => {
-            app.mode = AppMode::Dashboard;
+            // In Pull mode, if we came from RemoteBrowser, go back there
+            // Otherwise, go to Dashboard
+            match app.pending_sync_direction {
+                SyncDirection::Pull => {
+                    // Check if we have remote info (meaning we came from RemoteBrowser)
+                    if !app.pending_remote_host.is_empty() {
+                        app.mode = AppMode::RemoteBrowser;
+                    } else {
+                        app.mode = AppMode::Dashboard;
+                    }
+                }
+                SyncDirection::Push => {
+                    app.mode = AppMode::Dashboard;
+                }
+            }
             HandlerResult::Continue
         }
         KeyCode::Down => {
@@ -207,7 +243,7 @@ fn handle_local_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
             HandlerResult::Continue
         }
         KeyCode::Char(' ') => {
-            // Select the file or folder as the source
+            // Select the file or folder
             let selected_item = &app.dir_entries[app.selected_idx];
             
             let final_path = if selected_item == ".." {
@@ -223,17 +259,29 @@ fn handle_local_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                 }
             };
 
-            // STEP 1 COMPLETE: Source Selected (File OR Folder)
-            app.pending_source = final_path;
-            app.saved_hosts = load_hosts();
+            match app.pending_sync_direction {
+                SyncDirection::Push => {
+                    // Push mode: local is source, need to collect remote info
+                    app.pending_source = final_path;
+                    app.saved_hosts = load_hosts();
 
-            if app.saved_hosts.is_empty() {
-                app.mode = AppMode::RemoteHostInput;
-                app.input_remote_host = String::new();
-                app.is_editing_host = false;
-            } else {
-                app.mode = AppMode::HostSelect;
-                app.host_list_idx = 0;
+                    if app.saved_hosts.is_empty() {
+                        app.mode = AppMode::RemoteHostInput;
+                        app.input_remote_host = String::new();
+                        app.is_editing_host = false;
+                    } else {
+                        app.mode = AppMode::HostSelect;
+                        app.host_list_idx = 0;
+                    }
+                }
+                SyncDirection::Pull => {
+                    // Pull mode: local is destination, remote is already selected
+                    // Store local path as source (destination in Pull mode)
+                    app.pending_source = final_path;
+                    // Go directly to SyncModeSelect
+                    app.mode = AppMode::SyncModeSelect;
+                    app.sync_mode_selected_idx = 0;
+                }
             }
             HandlerResult::Continue
         }
@@ -319,7 +367,11 @@ fn handle_remote_host_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult 
             if !app.saved_hosts.is_empty() {
                 app.mode = AppMode::HostSelect;
             } else {
-                app.mode = AppMode::LocalBrowser;
+                // Go back based on direction
+                match app.pending_sync_direction {
+                    SyncDirection::Push => app.mode = AppMode::LocalBrowser,
+                    SyncDirection::Pull => app.mode = AppMode::Dashboard,
+                }
             }
             HandlerResult::Continue
         }
@@ -467,8 +519,48 @@ fn handle_password_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
             } else {
                 app.pending_password = Some(app.input_password.clone());
             }
-            app.mode = AppMode::SyncModeSelect;
-            app.sync_mode_selected_idx = 0;
+            
+            match app.pending_sync_direction {
+                SyncDirection::Push => {
+                    // Push mode: go to SyncModeSelect (after local source is selected)
+                    app.mode = AppMode::SyncModeSelect;
+                    app.sync_mode_selected_idx = 0;
+                }
+                SyncDirection::Pull => {
+                    // Pull mode: go to RemoteBrowser to select remote source
+                    app.mode = AppMode::RemoteBrowser;
+                    match send_req(ClientRequest::GetRemoteHome(
+                        app.pending_remote_host.clone(),
+                        app.pending_remote_port,
+                        app.pending_password.clone()
+                    )) {
+                        ServerResponse::RemoteHome(path) => {
+                            app.remote_current_path = path;
+                        }
+                        _ => {
+                            app.remote_current_path = "/".to_string();
+                        }
+                    }
+                    
+                    match send_req(ClientRequest::ListRemoteDirs(
+                        app.pending_remote_host.clone(),
+                        app.pending_remote_port,
+                        app.remote_current_path.clone(),
+                        app.pending_password.clone()
+                    )) {
+                        ServerResponse::DirList(d) => {
+                            app.dir_entries = d;
+                            app.dir_entries.insert(0, "..".to_string());
+                            app.selected_idx = 0;
+                        }
+                        ServerResponse::Error(e) => {
+                            eprintln!("Error listing remote dirs: {}", e);
+                            app.mode = AppMode::PasswordInput;
+                        }
+                        _ => {}
+                    }
+                }
+            }
             HandlerResult::Continue
         }
         KeyCode::Tab => {
@@ -490,7 +582,15 @@ fn handle_password_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
 fn handle_sync_mode_select_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
     match key.code {
         KeyCode::Esc => {
-            app.mode = AppMode::PasswordInput;
+            // Go back based on direction
+            match app.pending_sync_direction {
+                SyncDirection::Push => {
+                    app.mode = AppMode::PasswordInput;
+                }
+                SyncDirection::Pull => {
+                    app.mode = AppMode::LocalBrowser;
+                }
+            }
             HandlerResult::Continue
         }
         KeyCode::Down => {
@@ -518,36 +618,74 @@ fn handle_sync_mode_select_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                 _ => SyncMode::Mirror,
             };
             
-            app.mode = AppMode::RemoteBrowser;
-            match send_req(ClientRequest::GetRemoteHome(
-                app.pending_remote_host.clone(),
-                app.pending_remote_port,
-                app.pending_password.clone()
-            )) {
-                ServerResponse::RemoteHome(path) => {
-                    app.remote_current_path = path;
+            match app.pending_sync_direction {
+                SyncDirection::Push => {
+                    // Push mode: go to RemoteBrowser to select remote destination
+                    app.mode = AppMode::RemoteBrowser;
+                    match send_req(ClientRequest::GetRemoteHome(
+                        app.pending_remote_host.clone(),
+                        app.pending_remote_port,
+                        app.pending_password.clone()
+                    )) {
+                        ServerResponse::RemoteHome(path) => {
+                            app.remote_current_path = path;
+                        }
+                        _ => {
+                            app.remote_current_path = "/".to_string();
+                        }
+                    }
+                    
+                    match send_req(ClientRequest::ListRemoteDirs(
+                        app.pending_remote_host.clone(),
+                        app.pending_remote_port,
+                        app.remote_current_path.clone(),
+                        app.pending_password.clone()
+                    )) {
+                        ServerResponse::DirList(d) => {
+                            app.dir_entries = d;
+                            app.dir_entries.insert(0, "..".to_string());
+                            app.selected_idx = 0;
+                        }
+                        ServerResponse::Error(e) => {
+                            eprintln!("Error listing remote dirs: {}", e);
+                            app.mode = AppMode::SyncModeSelect;
+                        }
+                        _ => {}
+                    }
                 }
-                _ => {
-                    app.remote_current_path = "/".to_string();
+                SyncDirection::Pull => {
+                    // Pull mode: both source (remote) and destination (local) are already selected
+                    // Create task directly
+                    // In Pull mode: source = local (destination), remote_path = remote (source)
+                    let task_id = format!("task_{}", app.tasks.len() + 1);
+                    
+                    let new_task = SyncTask {
+                        id: task_id,
+                        source: app.pending_source.clone(), // Local destination
+                        remote_host: app.pending_remote_host.clone(),
+                        remote_port: app.pending_remote_port,
+                        remote_path: app.remote_current_path.clone(), // Remote source (stored when remote was selected)
+                        status: "STARTING".to_string(),
+                        last_log: "Created".to_string(),
+                        poll_interval: 5,
+                        sync_mode: app.pending_sync_mode.clone(),
+                        compress: app.pending_compress,
+                        password: app.pending_password.clone(),
+                        sync_direction: app.pending_sync_direction.clone(),
+                    };
+                    
+                    match send_req(ClientRequest::StartTask(new_task)) {
+                        ServerResponse::Ack => {
+                            app.mode = AppMode::Dashboard;
+                            app.pending_source.clear();
+                            app.remote_current_path.clear();
+                        }
+                        ServerResponse::Error(e) => {
+                            eprintln!("Error starting task: {}", e);
+                        }
+                        _ => {}
+                    }
                 }
-            }
-            
-            match send_req(ClientRequest::ListRemoteDirs(
-                app.pending_remote_host.clone(),
-                app.pending_remote_port,
-                app.remote_current_path.clone(),
-                app.pending_password.clone()
-            )) {
-                ServerResponse::DirList(d) => {
-                    app.dir_entries = d;
-                    app.dir_entries.insert(0, "..".to_string());
-                    app.selected_idx = 0;
-                }
-                ServerResponse::Error(e) => {
-                    eprintln!("Error listing remote dirs: {}", e);
-                    app.mode = AppMode::SyncModeSelect;
-                }
-                _ => {}
             }
             HandlerResult::Continue
         }
@@ -634,32 +772,60 @@ fn handle_remote_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
             };
             let final_path = final_path.replace("//", "/");
             
-            let task_id = format!("task_{}", app.tasks.len() + 1);
-            
-            let new_task = SyncTask {
-                id: task_id,
-                source: app.pending_source.clone(),
-                remote_host: app.pending_remote_host.clone(),
-                remote_port: app.pending_remote_port,
-                remote_path: final_path,
-                status: "STARTING".to_string(),
-                last_log: "Created".to_string(),
-                poll_interval: 5,
-                sync_mode: app.pending_sync_mode.clone(),
-                compress: app.pending_compress,
-                password: app.pending_password.clone(),
-            };
-            
-            match send_req(ClientRequest::StartTask(new_task)) {
-                ServerResponse::Ack => {
-                    app.mode = AppMode::Dashboard;
-                    app.pending_source.clear();
-                    app.remote_current_path.clear();
+            match app.pending_sync_direction {
+                SyncDirection::Push => {
+                    // Push mode: create task (local source already selected, remote destination just selected)
+                    let task_id = format!("task_{}", app.tasks.len() + 1);
+                    
+                    let new_task = SyncTask {
+                        id: task_id,
+                        source: app.pending_source.clone(),
+                        remote_host: app.pending_remote_host.clone(),
+                        remote_port: app.pending_remote_port,
+                        remote_path: final_path,
+                        status: "STARTING".to_string(),
+                        last_log: "Created".to_string(),
+                        poll_interval: 5,
+                        sync_mode: app.pending_sync_mode.clone(),
+                        compress: app.pending_compress,
+                        password: app.pending_password.clone(),
+                        sync_direction: app.pending_sync_direction.clone(),
+                    };
+                    
+                    match send_req(ClientRequest::StartTask(new_task)) {
+                        ServerResponse::Ack => {
+                            app.mode = AppMode::Dashboard;
+                            app.pending_source.clear();
+                            app.remote_current_path.clear();
+                        }
+                        ServerResponse::Error(e) => {
+                            eprintln!("Error starting task: {}", e);
+                        }
+                        _ => {}
+                    }
                 }
-                ServerResponse::Error(e) => {
-                    eprintln!("Error starting task: {}", e);
+                SyncDirection::Pull => {
+                    // Pull mode: store remote path (will be remote_path in task), then go to local browser
+                    // Store the selected remote path in remote_current_path (we'll use it when creating task)
+                    // remote_current_path will hold the selected remote source path
+                    // pending_source will be overwritten with local destination path later
+                    let selected_remote_path = final_path.clone();
+                    app.remote_current_path = selected_remote_path; // Store selected remote path
+                    // Now go to local browser to select local destination
+                    app.mode = AppMode::LocalBrowser;
+                    match send_req(ClientRequest::ListLocalDirs(app.current_path.clone())) {
+                        ServerResponse::DirList(d) => {
+                            app.dir_entries = d;
+                            app.dir_entries.insert(0, "..".to_string());
+                            app.selected_idx = 0;
+                        }
+                        ServerResponse::Error(e) => {
+                            eprintln!("Error listing dirs: {}", e);
+                            app.mode = AppMode::Dashboard;
+                        }
+                        _ => {}
+                    }
                 }
-                _ => {}
             }
             HandlerResult::Continue
         }

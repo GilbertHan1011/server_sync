@@ -9,6 +9,13 @@ pub enum SyncMode {
     Update,      // --update: Only overwrites if local file is newer
 }
 
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub enum SyncDirection {
+    Push,
+    Pull,
+}
+
 /// A single sync task
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SyncTask {
@@ -22,6 +29,7 @@ pub struct SyncTask {
     pub poll_interval: u64,
     pub sync_mode: SyncMode, // How to sync (Mirror, AddOnly, etc.)
     pub compress: bool,      // Enable compression (-z flag)
+    pub sync_direction: SyncDirection, // Push or Pull
     #[serde(default)]
     pub password: Option<String>, // Optional password for SSH authentication
 }
