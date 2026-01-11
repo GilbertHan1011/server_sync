@@ -670,11 +670,10 @@ fn handle_sync_mode_select_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                         poll_interval: 5,
                         sync_mode: app.pending_sync_mode.clone(),
                         compress: app.pending_compress,
-                        password: app.pending_password.clone(),
                         sync_direction: app.pending_sync_direction.clone(),
                     };
                     
-                    match send_req(ClientRequest::StartTask(new_task)) {
+                    match send_req(ClientRequest::StartTask(new_task, app.pending_password.clone())) {
                         ServerResponse::Ack => {
                             app.mode = AppMode::Dashboard;
                             app.pending_source.clear();
@@ -788,11 +787,10 @@ fn handle_remote_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                         poll_interval: 5,
                         sync_mode: app.pending_sync_mode.clone(),
                         compress: app.pending_compress,
-                        password: app.pending_password.clone(),
                         sync_direction: app.pending_sync_direction.clone(),
                     };
                     
-                    match send_req(ClientRequest::StartTask(new_task)) {
+                    match send_req(ClientRequest::StartTask(new_task, app.pending_password.clone())) {
                         ServerResponse::Ack => {
                             app.mode = AppMode::Dashboard;
                             app.pending_source.clear();

@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 use tokio::fs as tokio_fs;
+use keyring::Entry;
 use crate::protocol::{ClientRequest, ServerResponse, SyncTask};
 use crate::server::state::ServerState;
 use crate::server::ssh::{list_remote_dirs_ssh, get_remote_home_ssh};
@@ -78,11 +79,18 @@ pub async fn handle_request(
                 Err(e) => ServerResponse::Error(format!("Mkdir failed: {}", e)),
             }
         }
-        ClientRequest::StartTask(task) => {
+        ClientRequest::StartTask(task, password) => {
             // SECURITY: Validate host before starting task
             if !is_valid_host(&task.remote_host) {
                 ServerResponse::Error("Invalid remote host format".to_string())
             } else {
+                // Save password to keyring if provided
+                if let Some(pass) = password {
+                    if let Ok(entry) = Entry::new("server_sync", &task.id) {
+                        let _ = entry.set_password(&pass);
+                    }
+                }
+                
                 let task_id = task.id.clone();
                 let mut s = state.lock().unwrap();
                 if !s.tasks.contains_key(&task_id) {
@@ -92,6 +100,7 @@ pub async fn handle_request(
                     s.stoppers.insert(task_id, stopper);
                     
                     // Save tasks to disk (ASYNC - spawn to avoid blocking)
+                    // Task struct no longer contains password, so JSON is clean
                     let tasks_to_save = s.tasks.clone();
                     tokio::spawn(async move {
                         if let Err(e) = save_tasks(&tasks_to_save).await {
@@ -145,6 +154,11 @@ pub async fn handle_request(
             
             if let Some(tx) = stopper {
                 let _ = tx.send(()).await; // Kill thread
+            }
+            
+            // Remove password from keyring
+            if let Ok(entry) = Entry::new("server_sync", &id) {
+                let _ = entry.delete_credential();
             }
             
             let mut s = state.lock().unwrap();

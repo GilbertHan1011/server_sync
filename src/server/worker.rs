@@ -7,6 +7,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use notify::{Config, PollWatcher, RecursiveMode, Watcher};
 use chrono::Local;
+use keyring::Entry;
 use crate::protocol::{SyncTask, SyncMode, SyncDirection};
 use crate::common::utils::is_valid_host;
 use crate::server::state::{ServerState, update_status, update_log};
@@ -49,6 +50,11 @@ async fn write_log_line(log_path: &str, prefix: &str, line: &str) {
     {
         let _ = file.write_all(log_line.as_bytes()).await;
     }
+}
+
+// Helper to get password from keyring
+fn get_keyring_entry(task_id: &str) -> Option<Entry> {
+    Entry::new("server_sync", task_id).ok()
 }
 
 // --- SYNC WORKER ---
@@ -176,11 +182,13 @@ pub async fn run_dry_run(task: &SyncTask) -> Vec<String> {
     let mut cmd = Command::new("rsync");
     
     // --- ASKPASS LOGIC ---
-    if let Some(pass) = &task.password {
+    let password = get_keyring_entry(&task.id)
+        .and_then(|e| e.get_password().ok());
+    if let Some(pass) = password {
         if let Ok(script_path) = setup_askpass_script() {
             cmd.env("SSH_ASKPASS", &script_path);
             cmd.env("SSH_ASKPASS_REQUIRE", "force");
-            cmd.env("SERVER_SYNC_PW", pass);
+            cmd.env("SERVER_SYNC_PW", &pass);
             cmd.env("DISPLAY", ":0");
         }
     }
@@ -290,14 +298,17 @@ pub async fn run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
 
     let port = task.remote_port.unwrap_or(22);
     
-    if let Some(pass) = &task.password {
+    // Get password from keyring
+    let password = get_keyring_entry(&task.id)
+        .and_then(|e| e.get_password().ok());
+    if let Some(pass) = password {
         // 1. We assume the script is created. Since run_rsync is called often,
         // you might want to create it once in main(), or just overwrite it here.
         // Overwriting is safer to ensure it exists.
         if let Ok(script_path) = setup_askpass_script() { 
             cmd.env("SSH_ASKPASS", &script_path);
             cmd.env("SSH_ASKPASS_REQUIRE", "force");
-            cmd.env("SERVER_SYNC_PW", pass);
+            cmd.env("SERVER_SYNC_PW", &pass);
             cmd.env("DISPLAY", ":0");
         }
     }

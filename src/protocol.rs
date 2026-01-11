@@ -30,8 +30,6 @@ pub struct SyncTask {
     pub sync_mode: SyncMode, // How to sync (Mirror, AddOnly, etc.)
     pub compress: bool,      // Enable compression (-z flag)
     pub sync_direction: SyncDirection, // Push or Pull
-    #[serde(default)]
-    pub password: Option<String>, // Optional password for SSH authentication
 }
 
 /// Commands the Client sends to Server
@@ -41,7 +39,7 @@ pub enum ClientRequest {
     ListLocalDirs(String),           // "What folders are in /home/user?"
     ListRemoteDirs(String, Option<u16>, String, Option<String>),  // "What folders are on remote server at path X?" (host, path, port, password)
     GetRemoteHome(String, Option<u16>, Option<String>), // "What is the home directory on remote server?" (host, port, password)
-    StartTask(SyncTask),             // "Start syncing this new pair"
+    StartTask(SyncTask, Option<String>), // "Start syncing this new pair" (task, password)
     StopTask(String),                // "Stop task with ID 'X'"
     RestartTask(String),
     DryRun(String),                  // "Show what would change for task X (dry run)"
