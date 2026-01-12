@@ -31,14 +31,12 @@ enum Commands {
 
 fn main() {
     let cli = Cli::parse();
-    
-    // Initialize async runtime only where needed
-    let rt = Runtime::new().unwrap();
-
     let command = cli.command.unwrap_or(Commands::Ui);
 
     match command {
         Commands::Ui => {
+            // Initialize async runtime for client
+            let rt = Runtime::new().unwrap();
             // Auto-start server if not running
             if !daemon::is_server_running() {
                 println!("Server not running. Starting it...");
@@ -85,7 +83,8 @@ fn main() {
 
             match daemonize.start() {
                 Ok(_) => {
-                    // We are now in the background!
+                    // We are now in the background! Create runtime AFTER daemonization
+                    let rt = Runtime::new().unwrap();
                     if let Err(e) = rt.block_on(server_sync::server_main::run_server()) {
                         eprintln!("Server error: {}", e);
                     }

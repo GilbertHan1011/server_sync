@@ -10,6 +10,25 @@ use crate::common::utils::get_socket_path;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 
+// #region agent log
+fn debug_log(location: &str, message: &str, data: serde_json::Value) {
+    let log_path = "/home/gilberthan/disk1/projects/server_sync/.cursor/debug.log";
+    let entry = serde_json::json!({
+        "sessionId": "debug-session",
+        "runId": "run1",
+        "hypothesisId": "A",
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+    });
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(log_path) {
+        use std::io::Write;
+        let _ = writeln!(file, "{}", entry);
+    }
+}
+// #endregion
+
 /// Main server logic - runs the sync daemon
 pub async fn run_server() -> anyhow::Result<()> {
     let socket_path = get_socket_path();
@@ -58,38 +77,44 @@ pub async fn run_server() -> anyhow::Result<()> {
                 tokio::spawn(async move {
                     let mut buf = vec![0; 4096];
 
-                    loop {
-                        // Read Request
-                        let n = match socket.read(&mut buf).await {
-                            Ok(n) if n == 0 => break, // EOF
-                            Ok(n) => n,
-                            Err(_) => break,
-                        };
+                    // Read Request (one request per connection)
+                    let n = match socket.read(&mut buf).await {
+                        Ok(n) if n == 0 => return, // EOF
+                        Ok(n) => n,
+                        Err(e) => {
+                            eprintln!("Read error: {}", e);
+                            return;
+                        }
+                    };
 
-                        let req: ClientRequest = match serde_json::from_slice(&buf[..n]) {
-                            Ok(r) => r,
-                            Err(e) => {
-                                eprintln!("Failed to parse request: {}", e);
-                                continue;
-                            }
-                        };
+                    let req: ClientRequest = match serde_json::from_slice(&buf[..n]) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("Failed to parse request: {}", e);
+                            return;
+                        }
+                    };
 
-                        // Process Request using handler
-                        let resp = handle_request(req, state_ref.clone()).await;
+                    // Process Request using handler
+                    let resp = handle_request(req, state_ref.clone()).await;
 
-                        // Send Response
-                        match serde_json::to_string(&resp) {
-                            Ok(json) => {
-                                if socket.write_all(json.as_bytes()).await.is_err() {
-                                    break; // Client disconnected
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("Failed to serialize response: {}", e);
-                                break;
+                    // Send Response
+                    match serde_json::to_string(&resp) {
+                        Ok(json) => {
+                            if socket.write_all(json.as_bytes()).await.is_err() {
+                                eprintln!("Failed to write response");
+                            } else {
+                                // Flush the socket to ensure data is sent
+                                let _ = socket.flush().await;
+                                // Shutdown write side to signal EOF to client
+                                let _ = socket.shutdown().await;
                             }
                         }
+                        Err(e) => {
+                            eprintln!("Failed to serialize response: {}", e);
+                        }
                     }
+                    // Connection closes after response (client opens new connection per request)
                 });
             }
             Err(e) => {
