@@ -2,88 +2,17 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use tokio::net::UnixListener;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use daemonize::Daemonize;
-use clap::Parser;
-use server_sync::protocol::ClientRequest;
-use server_sync::server::state::{ServerState, load_tasks};
-use server_sync::server::worker::spawn_sync_worker;
-use server_sync::server::handler::handle_request;
-use server_sync::common::utils::get_socket_path;
+use crate::protocol::ClientRequest;
+use crate::server::state::{ServerState, load_tasks};
+use crate::server::worker::spawn_sync_worker;
+use crate::server::handler::handle_request;
+use crate::common::utils::get_socket_path;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 
-// --- CLI ARGUMENTS ---
-#[derive(Parser)]
-#[command(name = "server_sync")]
-#[command(about = "File synchronization daemon server", long_about = None)]
-struct ServerArgs {
-    /// Remote host (e.g., "user@hostname")
-    #[arg(short, long, default_value = "user@remote")]
-    remote_host: String,
-    
-    /// Path to log file (stdout if not provided)
-    #[arg(short, long)]
-    log: Option<String>,
-    
-    /// Run in foreground instead of daemonizing
-    #[arg(short, long)]
-    foreground: bool,
-}
-
-// --- MAIN ---
-// Synchronous main - daemonize BEFORE tokio runtime
-fn main() -> anyhow::Result<()> {
-    // Parse command-line arguments
-    let args = ServerArgs::parse();
-    
-    // Daemonize if not in foreground mode (BEFORE tokio runtime)
-    if !args.foreground {
-        let mut daemon = Daemonize::new()
-            .pid_file("/tmp/server_sync.pid")
-            .working_directory(".");
-        
-        // Setup log file redirection if provided
-        if let Some(ref log_path) = args.log {
-            match fs::File::create(log_path) {
-                Ok(log_file) => {
-                    daemon = daemon
-                        .stdout(log_file.try_clone()?)
-                        .stderr(log_file);
-                    eprintln!("Daemonizing with log file: {}", log_path);
-                }
-                Err(e) => {
-                    eprintln!("Failed to create log file {}: {}", log_path, e);
-                    eprintln!("Continuing without log file redirection");
-                }
-            }
-        }
-        
-        eprintln!("Starting server daemon...");
-        eprintln!("PID will be written to /tmp/server_sync.pid");
-        
-        match daemon.start() {
-            Ok(_) => {
-                // We're now in daemon mode - NOW create tokio runtime
-            }
-            Err(e) => {
-                eprintln!("Failed to daemonize: {}", e);
-                return Err(e.into());
-            }
-        }
-    } else {
-        println!("Running in foreground mode");
-    }
-    
-    // Create tokio runtime AFTER daemonization (if any)
-    let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(run_server(args))
-}
-
-// Async server logic - runs AFTER daemonization
-async fn run_server(args: ServerArgs) -> anyhow::Result<()> {
+/// Main server logic - runs the sync daemon
+pub async fn run_server() -> anyhow::Result<()> {
     let socket_path = get_socket_path();
-
-    println!("Using remote_host: {}", args.remote_host);
 
     // Clean up old socket file if it exists
     if std::path::Path::new(&socket_path).exists() {
@@ -100,7 +29,7 @@ async fn run_server(args: ServerArgs) -> anyhow::Result<()> {
     let state = Arc::new(Mutex::new(ServerState {
         tasks: HashMap::new(),
         stoppers: HashMap::new(),
-        remote_host: args.remote_host,
+        remote_host: "user@remote".to_string(), // Default, can be made configurable later
     }));
 
     // Ensure SSH control sockets directory exists

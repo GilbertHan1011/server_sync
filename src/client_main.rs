@@ -11,17 +11,19 @@ use ratatui::{
     backend::CrosstermBackend,
     Terminal,
 };
-use server_sync::protocol::{ClientRequest, ServerResponse, SyncMode, SyncDirection};
-use server_sync::client::state::{App, AppMode};
-use server_sync::client::network::send_req;
-use server_sync::client::ui::draw;
-use server_sync::client::handler::{handle_key_event, HandlerResult};
-use server_sync::client::config::load_hosts;
+use crate::protocol::{ClientRequest, ServerResponse, SyncMode, SyncDirection};
+use crate::client::state::{App, AppMode};
+use crate::client::network::send_req;
+use crate::client::ui::draw;
+use crate::client::handler::{handle_key_event, HandlerResult};
+use crate::client::config::load_hosts;
+use crate::common::daemon;
 
 // Global flag for Ctrl+C
 static CTRL_C_PRESSED: AtomicBool = AtomicBool::new(false);
 
-fn main() -> anyhow::Result<()> {
+/// Main client logic - runs the TUI
+pub async fn run_client() -> anyhow::Result<()> {
     // 0. Initialize Logging
     WriteLogger::init(
         LevelFilter::Info,
@@ -108,6 +110,8 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
         host_list_idx: 0,
         is_editing_host: false,
         input_new_dir: String::new(),
+        server_status: None,
+        server_status_last_check: std::time::Instant::now(),
     };
 
 
@@ -123,13 +127,22 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
             match send_req(ClientRequest::GetState) {
                 ServerResponse::State(t) => {
                     app.tasks = t;
+                    app.server_status = Some(true);
                 }
                 ServerResponse::Error(e) => {
                     if e.contains("not running") {
                         app.tasks = vec![];
+                        app.server_status = Some(false);
                     }
                 }
                 _ => {}
+            }
+
+            // Periodically check server status (every 3 seconds)
+            let now = std::time::Instant::now();
+            if now.duration_since(app.server_status_last_check).as_secs() >= 3 {
+                app.server_status = Some(daemon::is_server_running());
+                app.server_status_last_check = now;
             }
         }
 

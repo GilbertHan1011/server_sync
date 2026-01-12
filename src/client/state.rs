@@ -59,4 +59,7 @@ pub struct App {
     pub host_list_idx: usize,
     pub is_editing_host: bool,
     pub input_new_dir: String,
+    // Server Status
+    pub server_status: Option<bool>, // None = unknown, Some(true) = running, Some(false) = stopped
+    pub server_status_last_check: std::time::Instant,
 }

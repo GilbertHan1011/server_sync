@@ -1,9 +1,10 @@
 use std::path::Path;
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::client::state::{App, AppMode};
 use crate::client::network::send_req;
 use crate::client::config::{load_hosts, save_hosts};
 use crate::protocol::{ClientRequest, ServerResponse, SyncMode, SyncTask, SyncDirection};
+use crate::common::daemon;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum HandlerResult {
@@ -29,6 +30,21 @@ pub fn handle_key_event(key: KeyEvent, app: &mut App) -> HandlerResult {
 }
 
 fn handle_dashboard_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
+    // Check for Ctrl+R to restart server
+    if key.modifiers.contains(KeyModifiers::CONTROL) && (key.code == KeyCode::Char('r') || key.code == KeyCode::Char('R')) {
+        if let Err(e) = daemon::kill_server() {
+            eprintln!("Error stopping server: {}", e);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if let Err(e) = daemon::spawn_server() {
+            eprintln!("Error starting server: {}", e);
+        } else {
+            app.server_status = Some(true);
+            app.server_status_last_check = std::time::Instant::now();
+        }
+        return HandlerResult::Continue;
+    }
+
     match key.code {
         KeyCode::Char('q') | KeyCode::Char('Q') => HandlerResult::Quit,
         KeyCode::Down => {
@@ -284,6 +300,11 @@ fn handle_local_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                     app.sync_mode_selected_idx = 0;
                 }
             }
+            HandlerResult::Continue
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') => {
+            app.mode = AppMode::CreateLocalDir;
+            app.input_new_dir.clear();
             HandlerResult::Continue
         }
         _ => HandlerResult::Continue,

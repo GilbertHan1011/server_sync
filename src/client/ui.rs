@@ -56,6 +56,12 @@ pub fn draw(f: &mut Frame, app: &App) {
 }
 
 fn draw_dashboard(f: &mut Frame, app: &App, list_area: Rect, help_area: Rect) {
+    // Split list area to make room for server status
+    let dashboard_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(95), Constraint::Percentage(5)])
+        .split(list_area);
+
     let items: Vec<ListItem> = app.tasks.iter().enumerate().map(|(i,t)| {
         let color = match t.status.as_str() {
             "IDLE" => Color::Green,
@@ -89,10 +95,21 @@ fn draw_dashboard(f: &mut Frame, app: &App, list_area: Rect, help_area: Rect) {
 
     let list = List::new(items)
         .block(Block::default().title("Active Sync Tasks").borders(Borders::ALL));
-    f.render_widget(list, list_area);
+    f.render_widget(list, dashboard_chunks[0]);
+
+    // Server status indicator
+    let status_text = match app.server_status {
+        Some(true) => ("Server: ONLINE", Color::Green),
+        Some(false) => ("Server: OFFLINE", Color::Red),
+        None => ("Server: ?", Color::Yellow),
+    };
+    let status_widget = Paragraph::new(status_text.0)
+        .style(Style::default().fg(status_text.1))
+        .block(Block::default().borders(Borders::ALL));
+    f.render_widget(status_widget, dashboard_chunks[1]);
 
     let help = Paragraph::new(
-        "Controls:\n[A] Add Task [Push] \t [P] Add Task [Pull] \t [D] Delete Task \t [R] Dry Run \n[S] Restart Task \t[L] View Logs \t[Q] Quit"
+        "Controls:\n[A] Add Task [Push] \t [P] Add Task [Pull] \t [D] Delete Task \t [R] Dry Run \n[S] Restart Task \t[L] View Logs \t[Ctrl+R] Restart Server \t[Q] Quit"
     )
     .block(Block::default().borders(Borders::ALL));
     f.render_widget(help, help_area);

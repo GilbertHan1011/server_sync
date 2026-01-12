@@ -2,6 +2,7 @@ pub mod protocol;
 
 pub mod common {
     pub mod utils;
+    pub mod daemon;
 }
 
 pub mod server {
@@ -18,3 +19,6 @@ pub mod client {
     pub mod ui;
     pub mod handler;
 }
+
+pub mod server_main;
+pub mod client_main;
