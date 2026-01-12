@@ -80,7 +80,7 @@ pub async fn handle_request(
             }
         }
         ClientRequest::CreateLocalDir(path) => {
-            match tokio_fs::create_dir(&path).await {
+            match tokio_fs::create_dir_all(&path).await {
                 Ok(_) => ServerResponse::Ack,
                 Err(e) => ServerResponse::Error(format!("Mkdir failed: {}", e)),
             }

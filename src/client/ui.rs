@@ -128,7 +128,7 @@ fn draw_local_browser(f: &mut Frame, app: &App, size: Rect) {
         ),
         SyncDirection::Pull => (
             "Select Destination Folder",
-            "[Enter] Enter Dir  [Space] Select as Destination  [Esc] Back"
+            "[Enter] Enter Dir  [Space] Select as Destination [N] Create dir [Esc] Back"
         ),
     };
     let title = format!("{}: {}", title_text, app.current_path);
