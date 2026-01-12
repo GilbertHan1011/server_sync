@@ -44,6 +44,7 @@ pub enum ClientRequest {
     RestartTask(String),
     DryRun(String),                  // "Show what would change for task X (dry run)"
     CreateRemoteDir(String,Option<u16>,String,Option<String>), // "Create a directory on remote server at path X?" (host, port, path, password)
+    CreateLocalDir(String),          // "Create a directory on local machine at path X?"
     GetTaskLog(String),              // "Request log for task_id"
 }
 

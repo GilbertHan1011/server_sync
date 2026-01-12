@@ -24,6 +24,7 @@ pub fn handle_key_event(key: KeyEvent, app: &mut App) -> HandlerResult {
         AppMode::DryRunView => handle_dry_run_view_keys(key, app),
         AppMode::CreateRemoteDir => handle_remote_mkdir_input_keys(key, app),
         AppMode::LogView => handle_log_view_keys(key, app),
+        AppMode::CreateLocalDir => handle_local_mkdir_input_keys(key, app),
     }
 }
 
@@ -885,6 +886,54 @@ fn handle_log_view_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                 }
                 _ => {}
             }
+            HandlerResult::Continue
+        }
+        _ => HandlerResult::Continue,
+    }
+}
+
+fn handle_local_mkdir_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
+    match key.code {
+        KeyCode::Esc => {
+            app.mode = AppMode::LocalBrowser; // Cancel
+            HandlerResult::Continue
+        }
+        KeyCode::Enter => {
+            if !app.input_new_dir.trim().is_empty() {
+                // Construct path: current_path/new_dir_name
+                let new_path = if app.current_path == "/" {
+                    format!("/{}", app.input_new_dir.trim())
+                } else {
+                    format!("{}/{}", app.current_path, app.input_new_dir.trim())
+                };
+                match send_req(ClientRequest::CreateLocalDir(new_path)) {
+                    ServerResponse::Ack => {
+                        app.mode = AppMode::LocalBrowser;
+                        match send_req(ClientRequest::ListLocalDirs(app.current_path.clone())) {
+                            ServerResponse::DirList(d) => {
+                                app.dir_entries = d;
+                                app.dir_entries.insert(0, "..".to_string());
+                                app.selected_idx = 0;
+                            }
+                            _ => {}
+                        }
+                    }
+                    ServerResponse::Error(e) => {
+                        app.input_new_dir = format!("Error: {}", e);
+                    }
+                    _ => { app.mode = AppMode::LocalBrowser; }
+                } 
+            } else {
+                    app.mode = AppMode::LocalBrowser;
+                }
+                HandlerResult::Continue
+        }
+        KeyCode::Backspace => {
+            app.input_new_dir.pop();
+            HandlerResult::Continue
+        }
+        KeyCode::Char(c) => {
+            app.input_new_dir.push(c);
             HandlerResult::Continue
         }
         _ => HandlerResult::Continue,

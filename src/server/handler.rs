@@ -79,6 +79,12 @@ pub async fn handle_request(
                 Err(e) => ServerResponse::Error(format!("Mkdir failed: {}", e)),
             }
         }
+        ClientRequest::CreateLocalDir(path) => {
+            match tokio_fs::create_dir(&path).await {
+                Ok(_) => ServerResponse::Ack,
+                Err(e) => ServerResponse::Error(format!("Mkdir failed: {}", e)),
+            }
+        }
         ClientRequest::StartTask(task, password) => {
             // SECURITY: Validate host before starting task
             if !is_valid_host(&task.remote_host) {

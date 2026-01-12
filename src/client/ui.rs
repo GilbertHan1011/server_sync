@@ -51,6 +51,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         AppMode::HostSelect => draw_host_select(f, app, size),
         AppMode::CreateRemoteDir => draw_remote_mkdir_input(f, app, size),
         AppMode::LogView => draw_log_view(f, app, size),
+        AppMode::CreateLocalDir => draw_local_mkdir_input(f, app, size),
     }
 }
 
@@ -123,7 +124,7 @@ fn draw_local_browser(f: &mut Frame, app: &App, size: Rect) {
     let (title_text, instructions_text) = match app.pending_sync_direction {
         SyncDirection::Push => (
             "Select Source Folder",
-            "[Enter] Enter Dir  [Space] Select as Source  [Esc] Cancel"
+            "[Enter] Enter Dir  [Space] Select as Source [N] Create dir [Esc] Cancel"
         ),
         SyncDirection::Pull => (
             "Select Destination Folder",
@@ -417,6 +418,22 @@ fn draw_remote_mkdir_input(f: &mut Frame, app: &App, size: Rect) {
     ))
     .block(Block::default()
         .title("Create Remote Directory")
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Yellow))); // Yellow border to stand out
+        
+    f.render_widget(input_block, area);
+}
+
+fn draw_local_mkdir_input(f: &mut Frame, app: &App, size: Rect) {
+    let area = centered_rect(60, 20, size); // Small popup
+    f.render_widget(Clear, area);
+    
+    let input_block = Paragraph::new(format!(
+        "New Directory Name:\n\n{}|", 
+        app.input_new_dir
+    ))
+    .block(Block::default()
+        .title("Create Local Directory")
         .borders(Borders::ALL)
         .style(Style::default().fg(Color::Yellow))); // Yellow border to stand out
         

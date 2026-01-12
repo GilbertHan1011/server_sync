@@ -11,6 +11,7 @@ pub enum AppMode {
     PasswordInput,    // Enter SSH password (optional)
     SyncModeSelect,   // Select sync mode (Mirror, AddOnly, SafeSync, Update)
     CreateRemoteDir,  // Create a remote directory
+    CreateLocalDir,   // Create a local directory
     RemoteBrowser,    // Browse remote directories (destination selection)
     DryRunView,       // Display dry run results
     LogView,          // Display task logs
