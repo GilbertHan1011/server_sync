@@ -50,12 +50,14 @@ fn handle_dashboard_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
         KeyCode::Down => {
             if app.dashboard_selected_idx < app.tasks.len().saturating_sub(1) {
                 app.dashboard_selected_idx += 1;
+                update_dashboard_scroll(app);
             }
             HandlerResult::Continue
         }
         KeyCode::Up => {
             if app.dashboard_selected_idx > 0 {
                 app.dashboard_selected_idx -= 1;
+                update_dashboard_scroll(app);
             }
             HandlerResult::Continue
         }
@@ -69,6 +71,7 @@ fn handle_dashboard_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                     app.dir_entries = d;
                     app.dir_entries.insert(0, "..".to_string());
                     app.selected_idx = 0;
+                    update_browser_scroll(app);
                 }
                 ServerResponse::Error(e) => {
                     eprintln!("Error listing dirs: {}", e);
@@ -114,6 +117,7 @@ fn handle_dashboard_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                 if app.dashboard_selected_idx > 0 && app.dashboard_selected_idx >= app.tasks.len().saturating_sub(1) {
                      app.dashboard_selected_idx -= 1;
                 }
+                update_dashboard_scroll(app);
             }
             HandlerResult::Continue
         }
@@ -221,12 +225,14 @@ fn handle_local_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
         KeyCode::Down => {
             if app.selected_idx < app.dir_entries.len().saturating_sub(1) {
                 app.selected_idx += 1;
+                update_browser_scroll(app);
             }
             HandlerResult::Continue
         }
         KeyCode::Up => {
             if app.selected_idx > 0 {
                 app.selected_idx -= 1;
+                update_browser_scroll(app);
             }
             HandlerResult::Continue
         }
@@ -242,6 +248,7 @@ fn handle_local_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                     .to_string();
                 app.current_path = new_path.replace("//", "/");
                 request_local_list(app);
+                update_browser_scroll(app);
             } else if selected.ends_with('/') {
                 // It's a directory! Enter it.
                 // Remove the trailing slash for the path construction
@@ -255,6 +262,7 @@ fn handle_local_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
 
                 app.current_path = new_path.replace("//", "/");
                 request_local_list(app);
+                update_browser_scroll(app);
             }
             // If it's a file (no "/" suffix), do nothing
             HandlerResult::Continue
@@ -318,6 +326,7 @@ fn request_local_list(app: &mut App) {
             app.dir_entries = d;
             app.dir_entries.insert(0, "..".to_string());
             app.selected_idx = 0;
+            update_browser_scroll(app);
         }
         ServerResponse::Error(e) => {
             eprintln!("Error: {}", e);
@@ -574,6 +583,7 @@ fn handle_password_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                             app.dir_entries = d;
                             app.dir_entries.insert(0, "..".to_string());
                             app.selected_idx = 0;
+                            update_browser_scroll(app);
                         }
                         ServerResponse::Error(e) => {
                             eprintln!("Error listing remote dirs: {}", e);
@@ -667,6 +677,7 @@ fn handle_sync_mode_select_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                             app.dir_entries = d;
                             app.dir_entries.insert(0, "..".to_string());
                             app.selected_idx = 0;
+                            update_browser_scroll(app);
                         }
                         ServerResponse::Error(e) => {
                             eprintln!("Error listing remote dirs: {}", e);
@@ -723,12 +734,14 @@ fn handle_remote_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
         KeyCode::Down => {
             if app.selected_idx < app.dir_entries.len().saturating_sub(1) {
                 app.selected_idx += 1;
+                update_browser_scroll(app);
             }
             HandlerResult::Continue
         }
         KeyCode::Up => {
             if app.selected_idx > 0 {
                 app.selected_idx -= 1;
+                update_browser_scroll(app);
             }
             HandlerResult::Continue
         }
@@ -772,6 +785,7 @@ fn handle_remote_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                     app.dir_entries = d;
                     app.dir_entries.insert(0, "..".to_string());
                     app.selected_idx = 0;
+                    update_browser_scroll(app);
                 }
                 ServerResponse::Error(e) => {
                     eprintln!("Error navigating remote: {}", e);
@@ -838,6 +852,7 @@ fn handle_remote_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                             app.dir_entries = d;
                             app.dir_entries.insert(0, "..".to_string());
                             app.selected_idx = 0;
+                            update_browser_scroll(app);
                         }
                         ServerResponse::Error(e) => {
                             eprintln!("Error listing dirs: {}", e);
@@ -935,6 +950,7 @@ fn handle_local_mkdir_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult 
                                 app.dir_entries = d;
                                 app.dir_entries.insert(0, "..".to_string());
                                 app.selected_idx = 0;
+                                update_browser_scroll(app);
                             }
                             _ => {}
                         }
@@ -997,6 +1013,8 @@ fn handle_remote_mkdir_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult
                             ServerResponse::DirList(d) => {
                                 app.dir_entries = d;
                                 app.dir_entries.insert(0, "..".to_string());
+                                app.selected_idx = 0;
+                                update_browser_scroll(app);
                                 // Optional: Move selection to the new folder? 
                                 // For now, just reset or keep 0
                             }
@@ -1027,4 +1045,12 @@ fn handle_remote_mkdir_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult
         }
         _ => HandlerResult::Continue,
     }
+}
+
+fn update_dashboard_scroll(app: &mut App) {
+    app.dashboard_list_state.select(Some(app.dashboard_selected_idx));
+}
+
+fn update_browser_scroll(app: &mut App) {
+    app.browser_list_state.select(Some(app.selected_idx));
 }

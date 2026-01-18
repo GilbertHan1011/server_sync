@@ -1,4 +1,5 @@
 use crate::protocol::{SyncTask, SyncMode, SyncDirection};
+use ratatui::widgets::ListState;
 
 // --- UI STATE ---
 #[derive(Debug, Clone, PartialEq)]
@@ -21,10 +22,12 @@ pub struct App {
     pub mode: AppMode,
     pub tasks: Vec<SyncTask>,
     pub dashboard_selected_idx : usize,
+    pub dashboard_list_state: ListState,
     // Browser State
     pub current_path: String,
     pub dir_entries: Vec<String>,
     pub selected_idx: usize,
+    pub browser_list_state: ListState,
 
     // Task Creation State
     pub pending_source: String,        // Selected local path before remote browsing

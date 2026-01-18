@@ -27,7 +27,7 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
-pub fn draw(f: &mut Frame, app: &App) {
+pub fn draw(f: &mut Frame, app: &mut App) {
     let size = f.area();
     
     // Always draw dashboard
@@ -55,7 +55,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 }
 
-fn draw_dashboard(f: &mut Frame, app: &App, list_area: Rect, help_area: Rect) {
+fn draw_dashboard(f: &mut Frame, app: &mut App, list_area: Rect, help_area: Rect) {
     // Split list area to make room for server status
     let dashboard_chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -95,7 +95,7 @@ fn draw_dashboard(f: &mut Frame, app: &App, list_area: Rect, help_area: Rect) {
 
     let list = List::new(items)
         .block(Block::default().title("Active Sync Tasks").borders(Borders::ALL));
-    f.render_widget(list, dashboard_chunks[0]);
+    f.render_stateful_widget(list, dashboard_chunks[0], &mut app.dashboard_list_state);
 
     // Server status indicator
     let status_text = match app.server_status {
@@ -115,7 +115,7 @@ fn draw_dashboard(f: &mut Frame, app: &App, list_area: Rect, help_area: Rect) {
     f.render_widget(help, help_area);
 }
 
-fn draw_local_browser(f: &mut Frame, app: &App, size: Rect) {
+fn draw_local_browser(f: &mut Frame, app: &mut App, size: Rect) {
     let area = centered_rect(60, 60, size);
     f.render_widget(Clear, area);
 
@@ -160,7 +160,7 @@ fn draw_local_browser(f: &mut Frame, app: &App, size: Rect) {
     f.render_widget(instructions, browser_chunks[1]);
 }
 
-fn draw_remote_browser(f: &mut Frame, app: &App, size: Rect) {
+fn draw_remote_browser(f: &mut Frame, app: &mut App, size: Rect) {
     let area = centered_rect(60, 60, size);
     f.render_widget(Clear, area);
 
@@ -201,7 +201,8 @@ fn draw_remote_browser(f: &mut Frame, app: &App, size: Rect) {
     let b_block = Block::default()
         .title(title)
         .borders(Borders::ALL);
-    f.render_widget(List::new(dirs).block(b_block), browser_chunks[0]);
+    let list = List::new(dirs).block(b_block);
+    f.render_stateful_widget(list, browser_chunks[0], &mut app.browser_list_state);
 
     let instructions = Paragraph::new(instructions_text)
         .block(Block::default().borders(Borders::ALL));

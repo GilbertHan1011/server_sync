@@ -10,6 +10,7 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     Terminal,
+    widgets::ListState,
 };
 use crate::protocol::{ClientRequest, ServerResponse, SyncMode, SyncDirection};
 use crate::client::state::{App, AppMode};
@@ -24,11 +25,19 @@ static CTRL_C_PRESSED: AtomicBool = AtomicBool::new(false);
 
 /// Main client logic - runs the TUI
 pub async fn run_client() -> anyhow::Result<()> {
-    // 0. Initialize Logging
+    // 0. Initialize Logging (MOVED to hidden dir)
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let log_dir = format!("{}/.sync_daemon_logs", home);
+    
+    // Ensure directory exists
+    std::fs::create_dir_all(&log_dir)?;
+    
+    let log_path = format!("{}/client.log", log_dir);
+
     WriteLogger::init(
         LevelFilter::Info,
         Config::default(),
-        File::create("client_debug.log")?,
+        File::create(log_path)?, // Truncates on every start, preventing infinite growth
     )?;
     
     log::info!("Client starting...");
@@ -81,9 +90,11 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
         mode: AppMode::Dashboard,
         tasks: vec![],
         dashboard_selected_idx: 0,
+        dashboard_list_state: ListState::default(),
         current_path: start_path,
         dir_entries: vec![],
         selected_idx: 0,
+        browser_list_state: ListState::default(),
         pending_source: String::new(),
         remote_current_path: String::new(),
         pending_remote_host: String::new(),
@@ -164,7 +175,7 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> anyhow::
 
         // 2. RENDER
         terminal.draw(|f| {
-            draw(f, &app);
+            draw(f, &mut app);
         }).map_err(|_e| anyhow::anyhow!("Terminal draw error"))?;
 
         // 3. INPUT - Reduced timeout for responsive typing
