@@ -1,6 +1,6 @@
 # Server Sync
 
-A terminal UI (TUI) for managing **= sync tasks**, backed by a small local daemon.
+A terminal UI (TUI) for managing **sync tasks**, backed by a small local daemon.
 
 - Create **Push** tasks (local → remote) or **Pull** tasks (remote → local)
 - Choose a sync strategy: **Mirror**, **AddOnly**, **SafeSync**, **Update**
