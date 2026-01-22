@@ -5,7 +5,7 @@ A terminal UI (TUI) for managing **sync tasks**, backed by a small local daemon.
 - Create **Push** tasks (local → remote) or **Pull** tasks (remote → local)
 - Choose a sync strategy: **Mirror**, **AddOnly**, **SafeSync**, **Update**
 - Browse local/remote directories inside the TUI
-- View per-task logs and run dry-runs
+- View per-task logs
 - Tasks are persisted and restored automatically
 
 ## Requirements

@@ -407,10 +407,30 @@ fn handle_remote_host_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult 
             HandlerResult::Continue
         }
         KeyCode::Enter => {
-            let input = app.input_remote_host.trim();
+            let input_raw = app.input_remote_host.trim().to_string();
+            
+            // Save to List
+            if !input_raw.is_empty() {
+                // 1. Update the memory list
+                if app.is_editing_host {
+                    // Editing existing entry
+                    if app.host_list_idx < app.saved_hosts.len() {
+                        app.saved_hosts[app.host_list_idx] = input_raw.clone();
+                    }
+                } else {
+                    // Adding new entry (avoid duplicates)
+                    if !app.saved_hosts.contains(&input_raw) {
+                        app.saved_hosts.push(input_raw.clone());
+                    }
+                }
+                
+                // 2. Persist to disk
+                save_hosts(&app.saved_hosts);
+            }
             
             // Logic to handle "user@host:port" format
             // We split by the last ':' and check if the remainder is a number
+            let input = input_raw.as_str();
             let (host, port_str) = if let Some(idx) = input.rfind(':') {
                 let (h, p_str) = input.split_at(idx);
                 let potential_port = &p_str[1..]; // Skip the ':'
