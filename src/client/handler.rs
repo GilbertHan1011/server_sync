@@ -1,5 +1,6 @@
 use std::path::Path;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use chrono::Local;
 use crate::client::state::{App, AppMode};
 use crate::client::network::send_req;
 use crate::client::config::{load_hosts, save_hosts};
@@ -710,7 +711,7 @@ fn handle_sync_mode_select_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                     // Pull mode: both source (remote) and destination (local) are already selected
                     // Create task directly
                     // In Pull mode: source = local (destination), remote_path = remote (source)
-                    let task_id = format!("task_{}", app.tasks.len() + 1);
+                    let task_id = format!("task_{}", Local::now().timestamp());
                     
                     let new_task = SyncTask {
                         id: task_id,
@@ -830,7 +831,7 @@ fn handle_remote_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
             match app.pending_sync_direction {
                 SyncDirection::Push => {
                     // Push mode: create task (local source already selected, remote destination just selected)
-                    let task_id = format!("task_{}", app.tasks.len() + 1);
+                    let task_id = format!("task_{}", Local::now().timestamp());
                     
                     let new_task = SyncTask {
                         id: task_id,
