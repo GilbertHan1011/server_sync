@@ -47,10 +47,31 @@ pub async fn list_remote_dirs_ssh(remote_host: &str, port: Option<u16>, path: &s
     match output {
         Ok(o) if o.status.success() => {
             let raw = String::from_utf8_lossy(&o.stdout);
-            raw.lines()
-                .filter(|line| line.ends_with('/')) // Only show directories
-                .map(|line| line.replace("/", ""))   // Remove the trailing slash for display
-                .collect()
+            let mut items: Vec<String> = raw
+                .lines()
+                .filter(|line| !line.starts_with('.'))
+                .map(|line| {
+                    if line.ends_with('/') {
+                        line.to_string()
+                    } else {
+                        line.trim_end_matches(['*', '@', '=', '|', '>']).to_string()
+                    }
+                })
+                .collect();
+
+            items.sort_by(|a, b| {
+                let a_is_dir = a.ends_with('/');
+                let b_is_dir = b.ends_with('/');
+                if a_is_dir && !b_is_dir {
+                    std::cmp::Ordering::Less
+                } else if !a_is_dir && b_is_dir {
+                    std::cmp::Ordering::Greater
+                } else {
+                    a.cmp(b)
+                }
+            });
+
+            items
         }
         Ok(o) => vec![format!("SSH Error: {}", String::from_utf8_lossy(&o.stderr))],
         Err(e) => vec![format!("Exec Error: {}", e)],

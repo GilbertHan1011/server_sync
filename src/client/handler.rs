@@ -1,11 +1,11 @@
-use std::path::Path;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use chrono::Local;
-use crate::client::state::{App, AppMode};
-use crate::client::network::send_req;
 use crate::client::config::{load_hosts, save_hosts};
-use crate::protocol::{ClientRequest, ServerResponse, SyncMode, SyncTask, SyncDirection};
+use crate::client::network::send_req;
+use crate::client::state::{App, AppMode};
 use crate::common::daemon;
+use crate::protocol::{ClientRequest, ServerResponse, SyncDirection, SyncMode, SyncTask};
+use chrono::Local;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum HandlerResult {
@@ -32,7 +32,9 @@ pub fn handle_key_event(key: KeyEvent, app: &mut App) -> HandlerResult {
 
 fn handle_dashboard_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
     // Check for Ctrl+R to restart server
-    if key.modifiers.contains(KeyModifiers::CONTROL) && (key.code == KeyCode::Char('r') || key.code == KeyCode::Char('R')) {
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && (key.code == KeyCode::Char('r') || key.code == KeyCode::Char('R'))
+    {
         if let Err(e) = daemon::kill_server() {
             eprintln!("Error stopping server: {}", e);
         }
@@ -87,7 +89,7 @@ fn handle_dashboard_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
             app.pending_sync_direction = SyncDirection::Pull;
             app.sync_direction_selected_idx = 1;
             app.saved_hosts = load_hosts();
-            
+
             // Always allow user to select remote server
             if app.saved_hosts.is_empty() {
                 // No saved hosts, go to host input
@@ -108,15 +110,17 @@ fn handle_dashboard_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                 if app.dashboard_selected_idx >= app.tasks.len() {
                     app.dashboard_selected_idx = app.tasks.len().saturating_sub(1);
                 }
-                
+
                 // Delete the SELECTED task
                 if let Some(t) = app.tasks.get(app.dashboard_selected_idx) {
                     send_req(ClientRequest::StopTask(t.id.clone()));
                 }
-                
+
                 // Adjust selection if we deleted the last item
-                if app.dashboard_selected_idx > 0 && app.dashboard_selected_idx >= app.tasks.len().saturating_sub(1) {
-                     app.dashboard_selected_idx -= 1;
+                if app.dashboard_selected_idx > 0
+                    && app.dashboard_selected_idx >= app.tasks.len().saturating_sub(1)
+                {
+                    app.dashboard_selected_idx -= 1;
                 }
                 update_dashboard_scroll(app);
             }
@@ -176,7 +180,7 @@ fn handle_dashboard_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                 if app.dashboard_selected_idx >= app.tasks.len() {
                     app.dashboard_selected_idx = app.tasks.len().saturating_sub(1);
                 }
-                
+
                 if let Some(t) = app.tasks.get(app.dashboard_selected_idx) {
                     let tid = t.id.clone();
                     match send_req(ClientRequest::GetTaskLog(tid.clone())) {
@@ -186,7 +190,7 @@ fn handle_dashboard_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                             app.view_log_scroll = 0;
                             app.view_log_last_fetch = std::time::Instant::now();
                             app.mode = AppMode::LogView;
-                            
+
                             // Auto-scroll to bottom (simple heuristic: huge number)
                             let lines = app.view_task_log.lines().count();
                             if lines > 20 {
@@ -240,7 +244,7 @@ fn handle_local_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
         KeyCode::Enter => {
             // Navigate into directory (only if it's ".." or ends with "/")
             let selected = &app.dir_entries[app.selected_idx];
-            
+
             if selected == ".." {
                 let new_path = Path::new(&app.current_path)
                     .parent()
@@ -254,7 +258,7 @@ fn handle_local_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                 // It's a directory! Enter it.
                 // Remove the trailing slash for the path construction
                 let clean_name = selected.trim_end_matches('/');
-                
+
                 let new_path = if app.current_path == "/" {
                     format!("/{}", clean_name)
                 } else {
@@ -271,13 +275,13 @@ fn handle_local_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
         KeyCode::Char(' ') => {
             // Select the file or folder
             let selected_item = &app.dir_entries[app.selected_idx];
-            
+
             let final_path = if selected_item == ".." {
                 app.current_path.clone()
             } else {
                 // Strip slash if it's a directory so rsync treats it consistently
                 let clean_name = selected_item.trim_end_matches('/');
-                
+
                 if app.current_path == "/" {
                     format!("/{}", clean_name)
                 } else {
@@ -409,7 +413,7 @@ fn handle_remote_host_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult 
         }
         KeyCode::Enter => {
             let input_raw = app.input_remote_host.trim().to_string();
-            
+
             // Save to List
             if !input_raw.is_empty() {
                 // 1. Update the memory list
@@ -424,18 +428,18 @@ fn handle_remote_host_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult 
                         app.saved_hosts.push(input_raw.clone());
                     }
                 }
-                
+
                 // 2. Persist to disk
                 save_hosts(&app.saved_hosts);
             }
-            
+
             // Logic to handle "user@host:port" format
             // We split by the last ':' and check if the remainder is a number
             let input = input_raw.as_str();
             let (host, port_str) = if let Some(idx) = input.rfind(':') {
                 let (h, p_str) = input.split_at(idx);
                 let potential_port = &p_str[1..]; // Skip the ':'
-                
+
                 // Only treat as port if it parses successfully (avoids breaking IPv6)
                 if potential_port.parse::<u16>().is_ok() {
                     (h, Some(potential_port))
@@ -447,17 +451,17 @@ fn handle_remote_host_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult 
             };
 
             app.pending_remote_host = host.to_string();
-            
+
             // Setup next step: Port Input
-            app.mode = AppMode::RemotePortInput; 
-            
+            app.mode = AppMode::RemotePortInput;
+
             if let Some(p) = port_str {
                 app.input_remote_port = p.to_string(); // Use typed port
             } else {
                 app.input_remote_port = "22".to_string(); // Default
             }
-            
-            app.input_cursor_pos = app.input_remote_port.len(); 
+
+            app.input_cursor_pos = app.input_remote_port.len();
             HandlerResult::Continue
         }
         KeyCode::Left => {
@@ -549,7 +553,8 @@ fn handle_remote_port_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult 
             HandlerResult::Continue
         }
         KeyCode::Char(c) => {
-            if c.is_ascii_digit() { // Only allow numbers
+            if c.is_ascii_digit() {
+                // Only allow numbers
                 app.input_remote_port.insert(app.input_cursor_pos, c);
                 app.input_cursor_pos += 1;
             }
@@ -571,7 +576,7 @@ fn handle_password_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
             } else {
                 app.pending_password = Some(app.input_password.clone());
             }
-            
+
             match app.pending_sync_direction {
                 SyncDirection::Push => {
                     // Push mode: go to SyncModeSelect (after local source is selected)
@@ -584,7 +589,7 @@ fn handle_password_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                     match send_req(ClientRequest::GetRemoteHome(
                         app.pending_remote_host.clone(),
                         app.pending_remote_port,
-                        app.pending_password.clone()
+                        app.pending_password.clone(),
                     )) {
                         ServerResponse::RemoteHome(path) => {
                             app.remote_current_path = path;
@@ -593,12 +598,12 @@ fn handle_password_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                             app.remote_current_path = "/".to_string();
                         }
                     }
-                    
+
                     match send_req(ClientRequest::ListRemoteDirs(
                         app.pending_remote_host.clone(),
                         app.pending_remote_port,
                         app.remote_current_path.clone(),
-                        app.pending_password.clone()
+                        app.pending_password.clone(),
                     )) {
                         ServerResponse::DirList(d) => {
                             app.dir_entries = d;
@@ -670,7 +675,7 @@ fn handle_sync_mode_select_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                 3 => SyncMode::Update,
                 _ => SyncMode::Mirror,
             };
-            
+
             match app.pending_sync_direction {
                 SyncDirection::Push => {
                     // Push mode: go to RemoteBrowser to select remote destination
@@ -678,7 +683,7 @@ fn handle_sync_mode_select_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                     match send_req(ClientRequest::GetRemoteHome(
                         app.pending_remote_host.clone(),
                         app.pending_remote_port,
-                        app.pending_password.clone()
+                        app.pending_password.clone(),
                     )) {
                         ServerResponse::RemoteHome(path) => {
                             app.remote_current_path = path;
@@ -687,12 +692,12 @@ fn handle_sync_mode_select_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                             app.remote_current_path = "/".to_string();
                         }
                     }
-                    
+
                     match send_req(ClientRequest::ListRemoteDirs(
                         app.pending_remote_host.clone(),
                         app.pending_remote_port,
                         app.remote_current_path.clone(),
-                        app.pending_password.clone()
+                        app.pending_password.clone(),
                     )) {
                         ServerResponse::DirList(d) => {
                             app.dir_entries = d;
@@ -712,7 +717,7 @@ fn handle_sync_mode_select_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                     // Create task directly
                     // In Pull mode: source = local (destination), remote_path = remote (source)
                     let task_id = format!("task_{}", Local::now().timestamp());
-                    
+
                     let new_task = SyncTask {
                         id: task_id,
                         source: app.pending_source.clone(), // Local destination
@@ -726,8 +731,11 @@ fn handle_sync_mode_select_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                         compress: app.pending_compress,
                         sync_direction: app.pending_sync_direction.clone(),
                     };
-                    
-                    match send_req(ClientRequest::StartTask(new_task, app.pending_password.clone())) {
+
+                    match send_req(ClientRequest::StartTask(
+                        new_task,
+                        app.pending_password.clone(),
+                    )) {
                         ServerResponse::Ack => {
                             app.mode = AppMode::Dashboard;
                             app.pending_source.clear();
@@ -786,21 +794,27 @@ fn handle_remote_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                     }
                     None => app.remote_current_path.clone(),
                 }
-            } else {
+            } else if selected.ends_with('/') {
                 if app.remote_current_path == "/" {
-                    format!("/{}", selected)
+                    format!("/{}", selected.trim_end_matches('/'))
                 } else {
-                    format!("{}/{}", app.remote_current_path, selected)
+                    format!(
+                        "{}/{}",
+                        app.remote_current_path,
+                        selected.trim_end_matches('/')
+                    )
                 }
+            } else {
+                return HandlerResult::Continue;
             };
-            
+
             app.remote_current_path = new_path.replace("//", "/");
-            
+
             match send_req(ClientRequest::ListRemoteDirs(
                 app.pending_remote_host.clone(),
                 app.pending_remote_port,
                 app.remote_current_path.clone(),
-                app.pending_password.clone()
+                app.pending_password.clone(),
             )) {
                 ServerResponse::DirList(d) => {
                     app.dir_entries = d;
@@ -820,19 +834,20 @@ fn handle_remote_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
             let final_path = if selected_item == ".." {
                 app.remote_current_path.clone()
             } else {
+                let clean_name = selected_item.trim_end_matches('/');
                 if app.remote_current_path == "/" {
-                    format!("/{}", selected_item)
+                    format!("/{}", clean_name)
                 } else {
-                    format!("{}/{}", app.remote_current_path, selected_item)
+                    format!("{}/{}", app.remote_current_path, clean_name)
                 }
             };
             let final_path = final_path.replace("//", "/");
-            
+
             match app.pending_sync_direction {
                 SyncDirection::Push => {
                     // Push mode: create task (local source already selected, remote destination just selected)
                     let task_id = format!("task_{}", Local::now().timestamp());
-                    
+
                     let new_task = SyncTask {
                         id: task_id,
                         source: app.pending_source.clone(),
@@ -846,8 +861,11 @@ fn handle_remote_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                         compress: app.pending_compress,
                         sync_direction: app.pending_sync_direction.clone(),
                     };
-                    
-                    match send_req(ClientRequest::StartTask(new_task, app.pending_password.clone())) {
+
+                    match send_req(ClientRequest::StartTask(
+                        new_task,
+                        app.pending_password.clone(),
+                    )) {
                         ServerResponse::Ack => {
                             app.mode = AppMode::Dashboard;
                             app.pending_source.clear();
@@ -866,7 +884,7 @@ fn handle_remote_browser_keys(key: KeyEvent, app: &mut App) -> HandlerResult {
                     // pending_source will be overwritten with local destination path later
                     let selected_remote_path = final_path.clone();
                     app.remote_current_path = selected_remote_path; // Store selected remote path
-                    // Now go to local browser to select local destination
+                                                                    // Now go to local browser to select local destination
                     app.mode = AppMode::LocalBrowser;
                     match send_req(ClientRequest::ListLocalDirs(app.current_path.clone())) {
                         ServerResponse::DirList(d) => {
@@ -979,12 +997,14 @@ fn handle_local_mkdir_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult 
                     ServerResponse::Error(e) => {
                         app.input_new_dir = format!("Error: {}", e);
                     }
-                    _ => { app.mode = AppMode::LocalBrowser; }
-                } 
-            } else {
-                    app.mode = AppMode::LocalBrowser;
+                    _ => {
+                        app.mode = AppMode::LocalBrowser;
+                    }
                 }
-                HandlerResult::Continue
+            } else {
+                app.mode = AppMode::LocalBrowser;
+            }
+            HandlerResult::Continue
         }
         KeyCode::Backspace => {
             app.input_new_dir.pop();
@@ -1018,25 +1038,25 @@ fn handle_remote_mkdir_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult
                     app.pending_remote_host.clone(),
                     app.pending_remote_port,
                     new_path,
-                    app.pending_password.clone()
+                    app.pending_password.clone(),
                 )) {
                     ServerResponse::Ack => {
                         // Success: Go back to browser
                         app.mode = AppMode::RemoteBrowser;
-                        
+
                         // REFRESH the list immediately so we see the new folder
                         match send_req(ClientRequest::ListRemoteDirs(
                             app.pending_remote_host.clone(),
                             app.pending_remote_port,
                             app.remote_current_path.clone(),
-                            app.pending_password.clone()
+                            app.pending_password.clone(),
                         )) {
                             ServerResponse::DirList(d) => {
                                 app.dir_entries = d;
                                 app.dir_entries.insert(0, "..".to_string());
                                 app.selected_idx = 0;
                                 update_browser_scroll(app);
-                                // Optional: Move selection to the new folder? 
+                                // Optional: Move selection to the new folder?
                                 // For now, just reset or keep 0
                             }
                             _ => {}
@@ -1049,7 +1069,9 @@ fn handle_remote_mkdir_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult
                         // Optional: Force a redraw or keep mode to let user read it
                         // app.mode stays AppMode::CreateRemoteDir
                     }
-                    _ => { app.mode = AppMode::RemoteBrowser; }
+                    _ => {
+                        app.mode = AppMode::RemoteBrowser;
+                    }
                 }
             } else {
                 app.mode = AppMode::RemoteBrowser; // Empty name = cancel
@@ -1069,7 +1091,8 @@ fn handle_remote_mkdir_input_keys(key: KeyEvent, app: &mut App) -> HandlerResult
 }
 
 fn update_dashboard_scroll(app: &mut App) {
-    app.dashboard_list_state.select(Some(app.dashboard_selected_idx));
+    app.dashboard_list_state
+        .select(Some(app.dashboard_selected_idx));
 }
 
 fn update_browser_scroll(app: &mut App) {
