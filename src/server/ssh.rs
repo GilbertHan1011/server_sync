@@ -3,6 +3,60 @@ use std::os::unix::fs::PermissionsExt;
 use tokio::process::Command;
 use crate::common::utils::is_valid_host;
 
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace("'", "'\\''"))
+}
+
+pub async fn get_remote_path_signature_ssh(
+    remote_host: &str,
+    port: Option<u16>,
+    path: &str,
+    password: &Option<String>,
+) -> Result<String, String> {
+    if !is_valid_host(remote_host) {
+        return Err("Invalid remote host format".to_string());
+    }
+
+    let target_path = if path.is_empty() { "." } else { path };
+    let p = port.unwrap_or(22).to_string();
+    let mut cmd = Command::new("ssh");
+
+    if let Some(pass) = password {
+        if let Ok(script_path) = setup_askpass_script() {
+            cmd.env("SSH_ASKPASS", &script_path);
+            cmd.env("SSH_ASKPASS_REQUIRE", "force");
+            cmd.env("SERVER_SYNC_PW", pass);
+            cmd.env("DISPLAY", ":0");
+        }
+    }
+
+    let quoted_path = shell_single_quote(target_path);
+    let remote_cmd = format!(
+        "if [ -d {0} ]; then find {0} -printf '%P\\t%y\\t%s\\t%T@\\n' | sort; elif [ -e {0} ]; then stat -c '%n\\t%F\\t%s\\t%Y' {0}; else printf '__missing__\\n'; fi",
+        quoted_path
+    );
+
+    let output = cmd
+        .arg("-p").arg(&p)
+        .arg("-T")
+        .arg("-c").arg("aes128-gcm@openssh.com")
+        .arg("-o").arg("Compression=no")
+        .arg("-o").arg("StrictHostKeyChecking=no")
+        .arg("-o").arg("ControlMaster=auto")
+        .arg("-o").arg("ControlPath=~/.ssh/sockets/%r@%h-%p")
+        .arg("-o").arg("ControlPersist=600")
+        .arg(remote_host)
+        .arg(remote_cmd)
+        .output()
+        .await;
+
+    match output {
+        Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stdout).to_string()),
+        Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 // --- REMOTE DIRECTORY LISTING ---
 pub async fn list_remote_dirs_ssh(remote_host: &str, port: Option<u16>, path: &str, password: &Option<String>) -> Vec<String> {
     // SECURITY: Validate host before using in SSH command

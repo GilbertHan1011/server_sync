@@ -10,6 +10,7 @@ use chrono::Local;
 use keyring::Entry;
 use crate::protocol::{SyncTask, SyncMode, SyncDirection};
 use crate::common::utils::is_valid_host;
+use crate::server::ssh::get_remote_path_signature_ssh;
 use crate::server::state::{ServerState, update_status, update_log};
 use crate::server::ssh::setup_askpass_script;
 
@@ -75,23 +76,44 @@ pub fn spawn_sync_worker(
 
         // 2. Setup Watcher
         let (tx_file, mut rx_file) = mpsc::channel(100);
-        let path_clone = source.clone();
+        if task.sync_direction == SyncDirection::Push {
+            let path_clone = source.clone();
 
-        // Blocking Watcher Thread
-        std::thread::spawn(move || {
-            let (wt_tx, wt_rx) = std::sync::mpsc::channel();
-            let config = Config::default().with_poll_interval(Duration::from_secs(interval));
-            
-            if let Ok(mut watcher) = PollWatcher::new(wt_tx, config) {
-                if watcher.watch(std::path::Path::new(&path_clone), RecursiveMode::Recursive).is_ok() {
-                    for _ in wt_rx {
-                        if tx_file.blocking_send(()).is_err() {
-                            break;
+            // Blocking Watcher Thread
+            std::thread::spawn(move || {
+                let (wt_tx, wt_rx) = std::sync::mpsc::channel();
+                let config = Config::default().with_poll_interval(Duration::from_secs(interval));
+
+                if let Ok(mut watcher) = PollWatcher::new(wt_tx, config) {
+                    if watcher.watch(std::path::Path::new(&path_clone), RecursiveMode::Recursive).is_ok() {
+                        for _ in wt_rx {
+                            if tx_file.blocking_send(()).is_err() {
+                                break;
+                            }
                         }
                     }
                 }
+            });
+        }
+
+        let mut last_remote_signature = if task.sync_direction == SyncDirection::Pull {
+            let password = get_keyring_entry(&task.id)
+                .and_then(|e| e.get_password().ok());
+            match get_remote_path_signature_ssh(
+                &task.remote_host,
+                task.remote_port,
+                &task.remote_path,
+                &password,
+            ).await {
+                Ok(signature) => Some(signature),
+                Err(err) => {
+                    update_log(&task_id, &format!("⚠️ Remote signature check failed: {}", err), &state_handle);
+                    None
+                }
             }
-        });
+        } else {
+            None
+        };
 
         // 3. Event Loop
         let mut debounce_deadline: Option<tokio::time::Instant> = None;
@@ -131,6 +153,34 @@ pub fn spawn_sync_worker(
                     // Time is up! Run the sync.
                     debounce_deadline = None; // Reset timer
                     retry_run_rsync(&task, &state_handle).await;
+                }
+
+                _ = tokio::time::sleep(Duration::from_secs(interval)), if task.sync_direction == SyncDirection::Pull => {
+                    let password = get_keyring_entry(&task.id)
+                        .and_then(|e| e.get_password().ok());
+                    match get_remote_path_signature_ssh(
+                        &task.remote_host,
+                        task.remote_port,
+                        &task.remote_path,
+                        &password,
+                    ).await {
+                        Ok(signature) => {
+                            let changed = last_remote_signature
+                                .as_ref()
+                                .map(|previous| previous != &signature)
+                                .unwrap_or(true);
+
+                            if changed {
+                                last_remote_signature = Some(signature);
+                                update_status(&task_id, "PENDING...", &state_handle);
+                                update_log(&task_id, "🌐 Remote change detected, starting pull...", &state_handle);
+                                retry_run_rsync(&task, &state_handle).await;
+                            }
+                        }
+                        Err(err) => {
+                            update_log(&task_id, &format!("⚠️ Remote signature check failed: {}", err), &state_handle);
+                        }
+                    }
                 }
             }
         }
