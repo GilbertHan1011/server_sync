@@ -5,3 +5,4 @@ log
 *debug*
 config/
 error.log
+.hpc-sync-state/

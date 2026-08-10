@@ -1,106 +1,142 @@
-# Server Sync
+# hpc-sync
 
-A terminal UI (TUI) for managing **sync tasks**, backed by a small local daemon.
+`hpc-sync` is a one-shot, agent-friendly CLI for backing up predefined HPC directories to a
+restricted remote receiver with `rsync`.
 
-- Create **Push** tasks (local → remote) or **Pull** tasks (remote → local)
-- Choose a sync strategy: **Mirror**, **AddOnly**, **SafeSync**, **Update**
-- Browse local/remote directories inside the TUI
-- View per-task logs
-- Tasks are persisted and restored automatically
+It replaces the resident polling daemon for HPC use. Each invocation plans, runs, verifies, and
+exits. Version 0.1 supports only one-way **HPC → local backup** jobs.
+
+## Safety contract
+
+- Only predefined TOML job IDs are accepted; runtime source, destination, and shell fragments are
+  not accepted.
+- Every transfer creates a unique `snapshots/<run-id>/` recovery point.
+- Unchanged files are hard-linked with `--link-dest` after the first successful run.
+- No `--delete`, `--inplace`, password, TOTP automation, interactive SSH, or persistent daemon.
+- SSH uses a dedicated identity, pinned `known_hosts`, `BatchMode=yes`, and
+  `StrictHostKeyChecking=yes`.
+- A per-job OS file lock prevents overlapping operations.
+- The run is marked complete only after transfer, comparison, and remote completion-marker upload
+  succeed.
+- JSON stdout is stable for agents; command output and audit files are stored under `state_dir`.
+
+`rsync` does not snapshot a changing source tree. Prefer immutable release directories, or require
+`source_complete_marker` in the job configuration.
 
 ## Requirements
 
-- Rust toolchain (edition 2024)
-- `rsync` available on your machine
-- `ssh` available on your machine (OpenSSH)
-- For password-based SSH: a working system keyring is recommended (the app stores passwords in the OS keyring when provided)
+- Rust 1.85+ toolchain (edition 2024)
+- rsync 3.2+ on both ends
+- OpenSSH client on the HPC
+- A dedicated receiver key restricted with `rrsync`
 
-## Install
-
-Build locally:
+Build and install the one-shot binary:
 
 ```bash
-cargo build --release
+cargo build --release --bin hpc-sync
+install -m 0755 target/release/hpc-sync "$HOME/.local/bin/hpc-sync"
 ```
 
-Run:
+It can also be exercised directly from this repository:
 
 ```bash
-cargo run --release
+cargo run --release --bin hpc-sync -- describe --json
 ```
 
-## Usage
+## Configure
 
-The main binary is `sync_app` (default).
+Copy `examples/hpc-sync.example.toml` to a private location such as:
 
-### Start the TUI (default)
+```text
+~/.config/hpc-sync/config.toml
+```
+
+Unknown TOML keys are rejected. Paths must be absolute. `destination_root` is the path in the
+restricted receiver namespace, not an unrestricted local filesystem path.
+
+Provision and pin the receiver host key out of band. The private key must have mode `0600`.
+
+On the local receiver, dedicate a directory and add a forced command to `~/.ssh/authorized_keys`:
+
+```text
+restrict,command="/usr/bin/rrsync -wo -no-del /home/gilberthan/disk1/hpc-backups" ssh-ed25519 AAAA... hpc-sync
+```
+
+With that restriction, `destination_root = "/macrophage-atac"` maps to
+`/home/gilberthan/disk1/hpc-backups/macrophage-atac`. Use a separate key/root per trust boundary.
+If stable HPC egress addresses are known, add an authorized-keys `from="..."` restriction.
+
+## Agent workflow
+
+Set the configuration once:
 
 ```bash
-./target/release/sync_app
+export HPC_SYNC_CONFIG="$HOME/.config/hpc-sync/config.toml"
 ```
 
-
-### Manage the daemon
+Discover the contract and validate local prerequisites:
 
 ```bash
-sync_app start
-sync_app status
-sync_app stop
-sync_app restart
+hpc-sync describe --json
+hpc-sync check macrophage-atac --json
 ```
 
-Notes:
-- The TUI will **auto-start** the daemon if it is not running.
-- The `server` subcommand is internal.
+Create a dry-run plan:
 
-## TUI controls
+```bash
+hpc-sync plan macrophage-atac --json
+```
 
-### Dashboard
+Review the returned `items_path`, then apply exactly the returned `run_id` and `plan_hash`:
 
-- **A**: Add task (Push)
-- **P**: Add task (Pull)
-- **↑/↓**: Select task (list scrolls)
-- **D**: Delete selected task
-- **R**: Dry run selected task
-- **S**: Restart selected task
-- **L**: View selected task logs
-- **Ctrl+R**: Restart daemon
-- **Q**: Quit
+```bash
+hpc-sync run macrophage-atac \
+  --plan-run-id 20260721T120000Z-abcd1234 \
+  --approval PLAN_HASH \
+  --json
+```
 
-### Browsers (local/remote)
+Query and verify recovery points:
 
-- **↑/↓**: Move selection (list scrolls)
-- **Enter**: Enter directory
-- **Space**: Select current entry (source/destination depending on flow)
-- **N**: Create directory
-- **Esc**: Back/cancel
+```bash
+hpc-sync status macrophage-atac --json
+hpc-sync history macrophage-atac --limit 10 --json
+hpc-sync verify macrophage-atac --run-id RUN_ID --checksum --json
+```
 
-## Where data is stored
+Exit codes are described by `hpc-sync describe --json`. Failures return typed JSON with a stable
+error code, retryability, and suggested fix.
 
-All state is kept under your home directory:
+## Audit state
 
-- **Daemon socket**: `~/.sync_daemon.sock`
-- **Daemon PID**: `~/.sync_daemon.pid`
-- **Saved tasks**: `~/.sync_daemon_tasks.json`
-- **Saved remote hosts list**: `~/.sync_hosts`
-- **Logs directory**: `~/.sync_daemon_logs/`
-  - Daemon log: `~/.sync_daemon_logs/daemon.log`
-  - Client log: `~/.sync_daemon_logs/client.log`
-  - Per-task logs: `~/.sync_daemon_logs/<task_id>.log`
+```text
+state_dir/
+  locks/<job-id>.lock
+  latest/<job-id>.json
+  runs/<job-id>/<run-id>/
+    request.json
+    plan.json
+    items.txt
+    result.json
+    COMPLETED
+    *.stdout
+    *.stderr
+```
 
-## Sync modes
+Files are written atomically with mode `0600`; state directories use mode `0700`.
 
-- **Mirror**: exact copy (uses `--delete`)
-- **AddOnly**: add/update only (no delete)
-- **SafeSync**: mirror, but deleted files are moved to `.rsync-backup/` (uses `--delete --backup --backup-dir=.rsync-backup`)
-- **Update**: only overwrite if local file is newer (uses `--update`)
+## Deployment boundary
 
-## Security notes
+Version 0.1 intentionally has no daemon, watcher, scheduler, deletion, retention cleanup, mirror,
+publish, restore-overwrite, or bidirectional synchronization. Run it manually first on a small
+noncritical release and perform a scratch restore before scheduling it.
 
-- Remote host input is validated to reduce SSH flag-injection risk.
-- The SSH commands used by the daemon currently include `StrictHostKeyChecking=no` for non-interactive operation. If you need stricter host key verification, you may want to change this in the server SSH/rsync command builders.
+Do not add cron on the HPC until administrators confirm that bounded login-node transfers are
+allowed. Slurm-based transfer scheduling remains deferred until compute-node storage visibility,
+network egress, strict SSH, and the restricted key are tested.
 
-## Troubleshooting
+## Legacy Rust TUI
 
-- **Nothing happens / can’t connect**: check daemon status with `sync_app status`, and inspect `~/.sync_daemon_logs/daemon.log`.
-- **UI shows few items**: lists support scrolling; use **↑/↓** to move selection and the UI will scroll automatically.
+The existing Rust TUI/daemon remains in `src/` for migration reference. It is not recommended on
+the HPC: it restores resident workers, polls recursively, and its current SSH path disables strict
+host-key checking. Do not restart it as a fallback for `hpc-sync`.

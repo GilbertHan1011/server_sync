@@ -57,6 +57,52 @@ pub async fn get_remote_path_signature_ssh(
     }
 }
 
+pub async fn is_remote_path_file_ssh(
+    remote_host: &str,
+    port: Option<u16>,
+    path: &str,
+    password: &Option<String>,
+) -> Result<bool, String> {
+    if !is_valid_host(remote_host) {
+        return Err("Invalid remote host format".to_string());
+    }
+
+    let target_path = if path.is_empty() { "." } else { path };
+    let quoted_path = shell_single_quote(target_path);
+    let p = port.unwrap_or(22).to_string();
+    let mut cmd = Command::new("ssh");
+
+    if let Some(pass) = password {
+        if let Ok(script_path) = setup_askpass_script() {
+            cmd.env("SSH_ASKPASS", &script_path);
+            cmd.env("SSH_ASKPASS_REQUIRE", "force");
+            cmd.env("SERVER_SYNC_PW", pass);
+            cmd.env("DISPLAY", ":0");
+        }
+    }
+
+    let remote_cmd = format!("[ -f {0} ]", quoted_path);
+    let output = cmd
+        .arg("-p").arg(&p)
+        .arg("-T")
+        .arg("-c").arg("aes128-gcm@openssh.com")
+        .arg("-o").arg("Compression=no")
+        .arg("-o").arg("StrictHostKeyChecking=no")
+        .arg("-o").arg("ControlMaster=auto")
+        .arg("-o").arg("ControlPath=~/.ssh/sockets/%r@%h-%p")
+        .arg("-o").arg("ControlPersist=600")
+        .arg(remote_host)
+        .arg(remote_cmd)
+        .output()
+        .await;
+
+    match output {
+        Ok(o) if o.status.success() => Ok(true),
+        Ok(_) => Ok(false),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 // --- REMOTE DIRECTORY LISTING ---
 pub async fn list_remote_dirs_ssh(remote_host: &str, port: Option<u16>, path: &str, password: &Option<String>) -> Vec<String> {
     // SECURITY: Validate host before using in SSH command
