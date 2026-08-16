@@ -10,9 +10,22 @@ use chrono::Local;
 use keyring::Entry;
 use crate::protocol::{SyncTask, SyncMode, SyncDirection};
 use crate::common::utils::is_valid_host;
-use crate::server::ssh::get_remote_path_signature_ssh;
+use crate::server::ssh::{get_remote_path_signature_ssh, is_remote_path_file_ssh};
 use crate::server::state::{ServerState, update_status, update_log};
 use crate::server::ssh::setup_askpass_script;
+
+async fn get_pull_remote_source_arg(task: &SyncTask, password: &Option<String>) -> String {
+    let full_remote = format!("{}:{}", task.remote_host, task.remote_path);
+    match is_remote_path_file_ssh(
+        &task.remote_host,
+        task.remote_port,
+        &task.remote_path,
+        password,
+    ).await {
+        Ok(true) => full_remote,
+        _ => format!("{}/", full_remote),
+    }
+}
 
 // --- LOG UTILITIES ---
 pub fn get_task_log_path(task_id: &str) -> String {
@@ -234,7 +247,7 @@ pub async fn run_dry_run(task: &SyncTask) -> Vec<String> {
     // --- ASKPASS LOGIC ---
     let password = get_keyring_entry(&task.id)
         .and_then(|e| e.get_password().ok());
-    if let Some(pass) = password {
+    if let Some(ref pass) = password {
         if let Ok(script_path) = setup_askpass_script() {
             cmd.env("SSH_ASKPASS", &script_path);
             cmd.env("SSH_ASKPASS_REQUIRE", "force");
@@ -248,7 +261,11 @@ pub async fn run_dry_run(task: &SyncTask) -> Vec<String> {
     cmd.arg("--itemize-changes"); // Show detailed changes
     
     // Use same SSH optimization with StrictHostKeyChecking=no
-    let ssh_cmd = "ssh -T -c aes128-gcm@openssh.com -o Compression=no -o StrictHostKeyChecking=no -o ControlMaster=auto -o ControlPath=~/.ssh/sockets/%r@%h-%p -o ControlPersist=600";
+    let port = task.remote_port.unwrap_or(22);
+    let ssh_cmd = format!(
+        "ssh -p {} -T -c aes128-gcm@openssh.com -o Compression=no -o StrictHostKeyChecking=no -o ControlMaster=auto -o ControlPath=~/.ssh/sockets/%r@%h-%p -o ControlPersist=600",
+        port
+    );
     cmd.arg("-e").arg(ssh_cmd);
     
     if task.compress { 
@@ -270,25 +287,29 @@ pub async fn run_dry_run(task: &SyncTask) -> Vec<String> {
     
     cmd.arg("--filter=:- .gitignore");
     
-    // Determine if source is a file or directory
-    let source_arg = match tokio::fs::metadata(&task.source).await {
-        Ok(metadata) => {
-            if metadata.is_file() {
-                // For files, don't append trailing slash
-                task.source.clone()
-            } else {
-                // For directories, append trailing slash to sync contents
-                format!("{}/", task.source)
-            }
+    match task.sync_direction {
+        SyncDirection::Push => {
+            let source_arg = match tokio::fs::metadata(&task.source).await {
+                Ok(metadata) => {
+                    if metadata.is_file() {
+                        task.source.clone()
+                    } else {
+                        format!("{}/", task.source)
+                    }
+                }
+                Err(_) => {
+                    format!("{}/", task.source)
+                }
+            };
+            cmd.arg(source_arg);
+            cmd.arg(&full_remote);
         }
-        Err(_) => {
-            // If metadata check fails, default to directory behavior (with slash)
-            // This maintains backward compatibility
-            format!("{}/", task.source)
+        SyncDirection::Pull => {
+            let remote_source_arg = get_pull_remote_source_arg(task, &password).await;
+            cmd.arg(remote_source_arg);
+            cmd.arg(&task.source);
         }
-    };
-    cmd.arg(source_arg);
-    cmd.arg(&full_remote);
+    }
     
     match cmd.output().await {
         Ok(o) if o.status.success() => {
@@ -317,7 +338,6 @@ pub async fn run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
     let mut cmd = Command::new("rsync"); // Now tokio::process::Command
     
     let full_remote = format!("{}:{}", task.remote_host, task.remote_path);
-    let local_path = task.source.clone();
     let source_arg = match tokio::fs::metadata(&task.source).await {
         Ok(metadata) => {
             if metadata.is_file() {
@@ -336,8 +356,11 @@ pub async fn run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
             cmd.arg(&full_remote);
         }
         SyncDirection::Pull => {
-            cmd.arg(format!("{}/", full_remote)); // NOTE:We need to add a function to check whether remote is a file or not
-            cmd.arg(&local_path);
+            let password = get_keyring_entry(&task.id)
+                .and_then(|e| e.get_password().ok());
+            let remote_source_arg = get_pull_remote_source_arg(task, &password).await;
+            cmd.arg(remote_source_arg);
+            cmd.arg(&task.source);
         }
     }
     let sync_start_msg = format!("--- Starting Sync: {} -> {} ---", task.source, full_remote);
@@ -351,7 +374,7 @@ pub async fn run_rsync(task: &SyncTask, state: &Arc<Mutex<ServerState>>) {
     // Get password from keyring
     let password = get_keyring_entry(&task.id)
         .and_then(|e| e.get_password().ok());
-    if let Some(pass) = password {
+    if let Some(ref pass) = password {
         // 1. We assume the script is created. Since run_rsync is called often,
         // you might want to create it once in main(), or just overwrite it here.
         // Overwriting is safer to ensure it exists.
