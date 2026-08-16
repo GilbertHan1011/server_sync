@@ -1,0 +1,24 @@
+version = 1
+state_dir = "/home/zhangkaiLab/hanlitian/.local/state/hpc-sync"
+
+[jobs.macrophage-atac]
+profile = "backup"
+source = "/storage/zhangkaiLab/hanlitian/macrophage/releases/atac"
+# This is a path inside the rrsync receiver namespace. With the README example
+# receiver root, it maps to /home/gilberthan/disk1/hpc-backups/macrophage-atac.
+destination_root = "/macrophage-atac"
+source_complete_marker = ".hpc-sync-source-complete"
+excludes = ["*.tmp", ".snakemake/***"]
+preserve_hard_links = false
+preserve_acls = false
+preserve_xattrs = false
+verify_after_run = true
+max_runtime_seconds = 21600
+
+[jobs.macrophage-atac.ssh]
+host = "172.16.210.201"
+user = "gilberthan"
+identity_file = "/home/zhangkaiLab/hanlitian/.ssh/hpc-sync-local"
+known_hosts_file = "/home/zhangkaiLab/hanlitian/.ssh/hpc-sync-local.known_hosts"
+port = 22
+connect_timeout_seconds = 15

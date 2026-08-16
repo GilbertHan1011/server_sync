@@ -4,6 +4,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use fs2::FileExt;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -24,7 +25,7 @@ impl JobLock {
             .mode(0o600)
             .open(path)
             .map_err(|error| state_error("state_write_failed", path, &error))?;
-        file.try_lock().map_err(|error| {
+        FileExt::try_lock_exclusive(&file).map_err(|error| {
             AppError::new(
                 "job_locked",
                 format!("another operation holds {}: {error}", path.display()),
@@ -39,7 +40,7 @@ impl JobLock {
 
 impl Drop for JobLock {
     fn drop(&mut self) {
-        let _result = self.file.unlock();
+        let _result = FileExt::unlock(&self.file);
     }
 }
 
